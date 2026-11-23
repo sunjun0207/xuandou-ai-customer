@@ -138,7 +138,7 @@ export default function ConsolePage() {
   return (
     <div className="console">
       <aside className="console-side">
-        <a className="side-head" href="/">
+        <a className="console-brand" href="/">
           <Mark />
           <strong>炫兜</strong>
         </a>
@@ -152,14 +152,15 @@ export default function ConsolePage() {
             </a>
           ))}
         </nav>
-        <button type="button" className="text-btn" onClick={logout}>
+        <button type="button" className="console-logout" onClick={logout}>
           退出
         </button>
       </aside>
       <main className="console-main">
+        <div className="console-sheet">
         <header>
           <h1>{title}</h1>
-          {view === "projects" ? <p>对话里按名称选择项目。每个项目有一个雪花编号，发送时再为这次提问生成一个问题编号。</p> : null}
+          {view === "projects" ? <p>按名称维护项目。编号在创建时生成，对话里直接勾选，不用手填。</p> : null}
         </header>
         <form className="console-form" onSubmit={createItem}>
           {(fields[view] || []).map((field) =>
@@ -188,31 +189,30 @@ export default function ConsolePage() {
         </form>
         {error ? <p className="toast">{error}</p> : null}
         {view === "projects" ? (
-          <div className="project-grid">
+          <div className="record-list">
+            <div className="record-head">
+              <span>名称</span>
+              <span>编码</span>
+              <span>编号</span>
+              <span>状态</span>
+              <span />
+            </div>
             {items.length ? (
               items.map((item) => (
-                <article key={String(item.id)} className="project-card">
-                  <div>
-                    <h2>{String(item.name || "未命名")}</h2>
-                    <p>{String(item.code || "")}</p>
-                  </div>
-                  <dl>
-                    <div>
-                      <dt>项目编号</dt>
-                      <dd>{String(item.id)}</dd>
-                    </div>
-                    <div>
-                      <dt>状态</dt>
-                      <dd>{Number(item.status) === 0 ? "已关闭" : "进行中"}</dd>
-                    </div>
-                  </dl>
-                  <button type="button" className="text-btn" onClick={() => removeItem(String(item.id))}>
+                <div key={String(item.id)} className="record-row">
+                  <strong>{String(item.name || "未命名")}</strong>
+                  <span>{String(item.code || "—")}</span>
+                  <span className="record-id" title={String(item.id)}>
+                    {String(item.id)}
+                  </span>
+                  <span className={Number(item.status) === 0 ? "pill off" : "pill"}>{Number(item.status) === 0 ? "已关闭" : "进行中"}</span>
+                  <button type="button" className="row-action" onClick={() => removeItem(String(item.id))}>
                     删除
                   </button>
-                </article>
+                </div>
               ))
             ) : (
-              <p className="project-empty">还没有项目。填写名称和编码后添加，对话里就能选到。</p>
+              <p className="project-empty">还没有项目。填写名称和编码后点添加。</p>
             )}
           </div>
         ) : (
@@ -244,6 +244,7 @@ export default function ConsolePage() {
             {items.length ? null : <p className="project-empty">这里还没有记录。</p>}
           </div>
         )}
+        </div>
       </main>
     </div>
   );

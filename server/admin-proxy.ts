@@ -2,7 +2,7 @@ import type { IncomingMessage, ServerResponse } from "http";
 import { sendJson } from "./auth";
 import { readSession } from "./session";
 
-const PREFIXES = ["/api/projects", "/api/tasks", "/api/problems", "/api/users", "/api/roles", "/api/menus"];
+const PREFIXES = ["/api/projects", "/api/tasks", "/api/problems", "/api/users", "/api/roles", "/api/menus", "/api/conversations"];
 
 export function isAdminApi(pathname: string): boolean {
   return PREFIXES.some((prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`));

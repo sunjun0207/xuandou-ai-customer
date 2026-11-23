@@ -1,3 +1,5 @@
+import { nextSnowflake } from "./snowflake";
+
 export type UpstreamState = "connecting" | "open" | "down";
 
 export type ChatKind = "chat" | "confirm" | "progress" | "result" | "file";
@@ -78,8 +80,8 @@ const CONV_RE = /^[A-Za-z0-9_-]{4,64}$/;
 const ID_RE = /^[A-Za-z0-9_-]{8,40}$/;
 const LOOSE_RE = /^[A-Za-z0-9_-]{1,64}$/;
 
-export function newId(prefix: "c" | "m"): string {
-  return `${prefix}${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+export function newId(): string {
+  return nextSnowflake();
 }
 
 export function shanghaiNow(date = new Date()): string {
@@ -205,8 +207,8 @@ export function fromFrpSaved(saved: Saved, selfUserId: string): { type: "message
     return {
       type: "message",
       message: blankMessage({
-        id: id || newId("m"),
-        conversationId: "inbox",
+        id: id || newId(),
+        conversationId: "",
         role: self ? "user" : "assistant",
         kind: "file",
         text: "文件",
@@ -225,8 +227,8 @@ export function fromFrpSaved(saved: Saved, selfUserId: string): { type: "message
     return {
       type: "message",
       message: blankMessage({
-        id: id || newId("m"),
-        conversationId: "inbox",
+        id: id || newId(),
+        conversationId: "",
         role: self ? "user" : "assistant",
         text,
         time,
@@ -237,8 +239,8 @@ export function fromFrpSaved(saved: Saved, selfUserId: string): { type: "message
   }
 
   const kindRaw = clip(payload.kind, 16) || "chat";
-  const conversationId = clipId(payload.conversationId, CONV_RE) || "inbox";
-  const clientMsgId = clipId(payload.clientMsgId, ID_RE) || id || newId("m");
+  const conversationId = conversationOf(payload.conversationId);
+  const clientMsgId = clipId(payload.clientMsgId, ID_RE) || id || newId();
   const text = clip(payload.body, 8000) || clip(payload.text, 8000);
   const requestId = clipId(payload.requestId, LOOSE_RE);
   const streamId = clipId(payload.streamId, LOOSE_RE);
@@ -326,6 +328,11 @@ function preferId(prev: string, next: string): string {
   if (/^\d{10,}$/.test(next)) return next;
   if (/^\d{10,}$/.test(prev)) return prev;
   return next || prev;
+}
+
+function conversationOf(value: unknown): string {
+  const id = clipId(value, CONV_RE);
+  return id === "inbox" ? "" : id;
 }
 
 function projectList(frame: Record<string, unknown>): string[] {

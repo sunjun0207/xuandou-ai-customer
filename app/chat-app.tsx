@@ -8,7 +8,8 @@ import { blankMessage, mergeMessage, newId, type ChatMessage, type ServerFrame, 
 import { nextSnowflake } from "../shared/snowflake";
 
 type User = { userId: string; username: string; displayName: string; roleCode: string };
-type Conv = { id: string; title: string; updatedAt: number; messages: ChatMessage[] };
+type ConvMeta = { id: string; title: string; updatedAt: number; renamed?: boolean; pinned?: boolean; pinnedAt?: number };
+type Conv = ConvMeta & { messages: ChatMessage[] };
 type DraftFile = { name: string; mime: string; dataBase64: string };
 type Confirming = { requestId: string; conversationId: string; quote: string };
 type Project = { id: string; name: string; code: string; status: number };
@@ -31,12 +32,21 @@ export function ChatApp() {
   const [error, setError] = useState("");
   const [confirming, setConfirming] = useState<Confirming | null>(null);
   const [file, setFile] = useState<DraftFile | null>(null);
+  const [menuId, setMenuId] = useState("");
+  const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
+  const [renameId, setRenameId] = useState("");
+  const [renameDraft, setRenameDraft] = useState("");
+  const [selecting, setSelecting] = useState(false);
+  const [checked, setChecked] = useState<string[]>([]);
+  const [hint, setHint] = useState("");
   const wsRef = useRef<WebSocket | null>(null);
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
   const threadRef = useRef<HTMLDivElement | null>(null);
   const boxRef = useRef<HTMLTextAreaElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const renameIdRef = useRef("");
+  renameIdRef.current = renameId;
 
   useEffect(() => {
     let stop = false;
@@ -49,19 +59,17 @@ export function ChatApp() {
         const body = (await res.json()) as { user: User };
         if (stop) return;
         setUser(body.user);
-        try {
-          const saved = JSON.parse(localStorage.getItem(storageKey(body.user.username)) || "null") as {
-            convs?: Conv[];
-            activeId?: string;
-            projectIds?: string[];
-            projectId?: string;
-          } | null;
-          if (saved?.convs) setConvs(saved.convs);
-          if (typeof saved?.activeId === "string") setActiveId(saved.activeId);
-          if (Array.isArray(saved?.projectIds)) setPickedIds(saved.projectIds.filter((item) => typeof item === "string"));
-          else if (typeof saved?.projectId === "string" && saved.projectId) setPickedIds([saved.projectId]);
-        } catch {
-          // 本地没有可用的会话缓存。
+        const loaded = await fetch("/api/conversations");
+        if (stop) return;
+        if (loaded.status === 401) {
+          router.replace("/login");
+          return;
+        }
+        if (loaded.ok) {
+          const data = (await loaded.json()) as { items?: ConvMeta[] };
+          setConvs(mergeList([], Array.isArray(data.items) ? data.items : [], ""));
+        } else {
+          setError("会话列表暂时读不出来");
         }
         setHydrated(true);
         setReady(true);
@@ -74,8 +82,51 @@ export function ChatApp() {
 
   useEffect(() => {
     if (!user || !hydrated) return;
-    localStorage.setItem(storageKey(user.username), JSON.stringify({ convs: trim(convs), activeId, projectIds: pickedIds }));
-  }, [user, hydrated, convs, activeId, pickedIds]);
+    let stop = false;
+    const pull = async () => {
+      if (stop || document.visibilityState === "hidden") return;
+      const listed = await fetch("/api/conversations");
+      if (stop || listed.status === 401) return;
+      if (!listed.ok) return;
+      const data = (await listed.json()) as { items?: ConvMeta[] };
+      const items = Array.isArray(data.items) ? data.items : [];
+      setConvs((prev) => mergeList(prev, items, renameIdRef.current));
+      const current = activeIdRef.current;
+      if (!current) return;
+      const detail = await fetch(`/api/conversations/${encodeURIComponent(current)}`);
+      if (stop || !detail.ok) return;
+      const body = (await detail.json()) as { item?: ConvMeta & { messages?: ChatMessage[] } };
+      const messages = Array.isArray(body.item?.messages) ? body.item.messages : [];
+      setConvs((prev) => prev.map((conv) => (conv.id === current ? { ...conv, messages: mergeMessages(conv.messages, messages) } : conv)));
+    };
+    void pull();
+    const timer = window.setInterval(() => void pull(), 4000);
+    const onFocus = () => void pull();
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+    return () => {
+      stop = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+    };
+  }, [user, hydrated]);
+
+  useEffect(() => {
+    if (!user || !hydrated || !activeId) return;
+    let stop = false;
+    fetch(`/api/conversations/${encodeURIComponent(activeId)}`)
+      .then(async (res) => {
+        if (stop || !res.ok) return;
+        const body = (await res.json()) as { item?: { messages?: ChatMessage[] } };
+        const messages = Array.isArray(body.item?.messages) ? body.item.messages : [];
+        setConvs((prev) => prev.map((conv) => (conv.id === activeId ? { ...conv, messages: mergeMessages(conv.messages, messages) } : conv)));
+      })
+      .catch(() => undefined);
+    return () => {
+      stop = true;
+    };
+  }, [user, hydrated, activeId]);
 
   useEffect(() => {
     if (!user) return;
@@ -134,7 +185,24 @@ export function ChatApp() {
     };
   }, [user, hydrated]);
 
+  useEffect(() => {
+    if (!menuId) return;
+    const close = (event: MouseEvent) => {
+      const target = event.target as Element | null;
+      if (target?.closest(".conv-menu, .conv-more")) return;
+      setMenuId("");
+    };
+    const hide = () => setMenuId("");
+    window.addEventListener("mousedown", close);
+    window.addEventListener("scroll", hide, true);
+    return () => {
+      window.removeEventListener("mousedown", close);
+      window.removeEventListener("scroll", hide, true);
+    };
+  }, [menuId]);
+
   const active = convs.find((item) => item.id === activeId);
+  const listed = sortConvs(convs);
   const messages = active?.messages || [];
   const hero = messages.length === 0;
 
@@ -150,8 +218,8 @@ export function ChatApp() {
       return;
     }
     if (!text && !file) return;
-    const conversationId = activeId || newId("c");
-    const clientMsgId = newId("m");
+    const conversationId = activeId || newId();
+    const clientMsgId = newId();
     const projectIds = pickedIds.filter((id) => {
       const found = projects.find((item) => item.id === id);
       return !found || found.status !== 0;
@@ -198,7 +266,7 @@ export function ChatApp() {
       JSON.stringify({
         type: "confirm",
         conversationId: message.conversationId,
-        clientMsgId: newId("m"),
+        clientMsgId: newId(),
         requestId: message.requestId,
         decision: "accept",
         text: "同意",
@@ -226,6 +294,96 @@ export function ChatApp() {
     if (fileRef.current) fileRef.current.value = "";
   }
 
+  function openMenu(event: { stopPropagation: () => void; currentTarget: HTMLButtonElement }, id: string) {
+    event.stopPropagation();
+    const rect = event.currentTarget.getBoundingClientRect();
+    const width = 168;
+    setMenuPos({ top: Math.min(rect.bottom + 6, window.innerHeight - 230), left: Math.max(8, rect.right - width) });
+    setMenuId(id);
+  }
+
+  function renameConv(id: string) {
+    const title = renameDraft.replace(/\s+/g, " ").trim().slice(0, 40);
+    setRenameId("");
+    if (!title) return;
+    setConvs((prev) => prev.map((conv) => (conv.id === id ? { ...conv, title, renamed: true } : conv)));
+    void fetch(`/api/conversations/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title }),
+    }).then((res) => {
+      if (!res.ok) setHint("重命名没有保存");
+    });
+  }
+
+  function pinConv(id: string) {
+    setMenuId("");
+    const current = convs.find((conv) => conv.id === id);
+    const pinned = !current?.pinned;
+    setConvs((prev) => prev.map((conv) => (conv.id === id ? { ...conv, pinned, pinnedAt: pinned ? Date.now() : 0 } : conv)));
+    void fetch(`/api/conversations/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ pinned }),
+    }).then((res) => {
+      if (!res.ok) setHint("置顶没有保存");
+    });
+  }
+
+  async function shareConv(conv: Conv) {
+    setMenuId("");
+    const lines = [conv.title, ...conv.messages.map((message) => `${message.role === "user" ? "我" : "炫兜"}：${message.text}`)];
+    const text = lines.filter(Boolean).join("\n");
+    let copied = false;
+    try {
+      await navigator.clipboard.writeText(text);
+      copied = true;
+    } catch {
+      const area = document.createElement("textarea");
+      area.value = text;
+      document.body.appendChild(area);
+      area.select();
+      copied = document.execCommand("copy");
+      area.remove();
+    }
+    setHint(copied ? "对话内容已复制，可以粘贴分享" : "复制失败，请允许剪贴板权限后再分享");
+    window.setTimeout(() => setHint(""), 2500);
+  }
+
+  function beginSelect(id: string) {
+    setMenuId("");
+    setSelecting(true);
+    setChecked((prev) => (prev.includes(id) ? prev : [...prev, id]));
+  }
+
+  function toggleChecked(id: string) {
+    setChecked((prev) => (prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]));
+  }
+
+  function deleteConvs(ids: string[]) {
+    setMenuId("");
+    void fetch("/api/conversations/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ids }),
+    }).then((res) => {
+      if (!res.ok) {
+        setHint("删除没有保存");
+        return;
+      }
+      setConvs((prev) => prev.filter((conv) => !ids.includes(conv.id)));
+      if (ids.includes(activeIdRef.current)) {
+        setActiveId("");
+        setConfirming(null);
+      }
+      setChecked((prev) => {
+        const next = prev.filter((id) => !ids.includes(id));
+        if (next.length === 0) setSelecting(false);
+        return next;
+      });
+    });
+  }
+
   async function logout() {
     wsRef.current?.close();
     await fetch("/api/auth/logout", { method: "POST" });
@@ -247,22 +405,92 @@ export function ChatApp() {
           <Plus />
           开启新对话
         </button>
+        {hint ? <div className="conv-hint">{hint}</div> : null}
         <div className="conv-list">
-          {convs.map((conv) => (
-            <button
-              key={conv.id}
-              type="button"
-              className={conv.id === activeId ? "conv active" : "conv"}
-              onClick={() => {
-                setActiveId(conv.id);
-                setConfirming(null);
-                if (window.matchMedia("(max-width: 800px)").matches) setNav(false);
-              }}
-            >
-              {conv.title}
-            </button>
+          {listed.map((conv) => (
+            <div key={conv.id} className={conv.id === activeId ? "conv-row active" : menuId === conv.id ? "conv-row open" : "conv-row"}>
+              {selecting ? (
+                <input
+                  className="conv-check"
+                  type="checkbox"
+                  checked={checked.includes(conv.id)}
+                  aria-label={`选择${conv.title}`}
+                  onChange={() => toggleChecked(conv.id)}
+                />
+              ) : null}
+              {renameId === conv.id ? (
+                <input
+                  className="conv-rename"
+                  value={renameDraft}
+                  aria-label="会话名称"
+                  autoFocus
+                  onChange={(event) => setRenameDraft(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") renameConv(conv.id);
+                    if (event.key === "Escape") setRenameId("");
+                  }}
+                  onBlur={() => renameConv(conv.id)}
+                />
+              ) : (
+                <button
+                  type="button"
+                  className="conv"
+                  onClick={() => {
+                    if (selecting) {
+                      toggleChecked(conv.id);
+                      return;
+                    }
+                    setActiveId(conv.id);
+                    setConfirming(null);
+                    if (window.matchMedia("(max-width: 800px)").matches) setNav(false);
+                  }}
+                >
+                  {conv.pinned ? <PinMark /> : null}
+                  <span>{conv.title}</span>
+                </button>
+              )}
+              <button type="button" className="conv-more" aria-label={`${conv.title}的更多操作`} onClick={(event) => openMenu(event, conv.id)}>
+                ···
+              </button>
+            </div>
           ))}
         </div>
+        {selecting ? (
+          <div className="conv-select-bar">
+            <span>已选 {checked.length}</span>
+            <button type="button" disabled={!checked.length} onClick={() => deleteConvs(checked)}>
+              删除
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setSelecting(false);
+                setChecked([]);
+              }}
+            >
+              取消
+            </button>
+          </div>
+        ) : null}
+        {menuId ? (
+          <div className="conv-menu" style={{ top: menuPos.top, left: menuPos.left }} role="menu">
+            <button type="button" onClick={() => { const conv = convs.find((item) => item.id === menuId); setMenuId(""); setRenameDraft(conv?.title || ""); setRenameId(menuId); }}>
+              <Pencil /> 重命名
+            </button>
+            <button type="button" onClick={() => pinConv(menuId)}>
+              <PinIcon /> {convs.find((item) => item.id === menuId)?.pinned ? "取消置顶" : "置顶"}
+            </button>
+            <button type="button" onClick={() => { const conv = convs.find((item) => item.id === menuId); if (conv) void shareConv(conv); }}>
+              <ShareIcon /> 分享
+            </button>
+            <button type="button" onClick={() => beginSelect(menuId)}>
+              <Checks /> 多选
+            </button>
+            <button type="button" className="danger" onClick={() => deleteConvs([menuId])}>
+              <Trash /> 删除
+            </button>
+          </div>
+        ) : null}
         <a className="console-link" href="/app/projects">
           项目后台
         </a>
@@ -544,16 +772,16 @@ function Composer({
 }
 
 function inOpenConversation(message: ChatMessage, activeId: string): ChatMessage {
-  if (message.role === "user" || !activeId) return message;
-  if (message.conversationId && message.conversationId !== "inbox") return message;
-  return { ...message, conversationId: activeId };
+  const missing = !message.conversationId || message.conversationId === "inbox";
+  if (!missing) return message;
+  return { ...message, conversationId: activeId || newId() };
 }
 
 function applyMessage(prev: Conv[], message: ChatMessage): Conv[] {
   const convs = prev.map((item) => ({ ...item, messages: item.messages.slice() }));
   let index = convs.findIndex((item) => item.id === message.conversationId);
   if (index < 0) {
-    convs.unshift({ id: message.conversationId, title: "新的对话", updatedAt: Date.now(), messages: [] });
+    convs.unshift({ id: message.conversationId, title: "新的对话", updatedAt: Date.now(), messages: [], renamed: false, pinned: false });
     index = 0;
   }
   const conv = convs[index];
@@ -561,7 +789,7 @@ function applyMessage(prev: Conv[], message: ChatMessage): Conv[] {
   if (found >= 0) conv.messages[found] = mergeMessage(conv.messages[found], message);
   else conv.messages.push(message);
   const firstUser = conv.messages.find((item) => item.role === "user" && item.text);
-  conv.title = titleFrom(firstUser?.text || message.text);
+  if (!conv.renamed) conv.title = titleFrom(firstUser?.text || message.text);
   conv.updatedAt = Date.now();
   const [item] = convs.splice(index, 1);
   convs.unshift(item);
@@ -575,7 +803,7 @@ function applyDelta(prev: Conv[], message: ChatMessage, done: boolean): Conv[] {
   let index = convs.findIndex((item) => item.id === message.conversationId);
   if (index < 0) {
     if (done) return prev;
-    convs.unshift({ id: message.conversationId, title: "新的对话", updatedAt: Date.now(), messages: [] });
+    convs.unshift({ id: message.conversationId, title: "新的对话", updatedAt: Date.now(), messages: [], renamed: false, pinned: false });
     index = 0;
   }
   const messages = convs[index].messages;
@@ -603,8 +831,16 @@ function removeMessage(prev: Conv[], clientMsgId: string): Conv[] {
     .filter((conv) => conv.messages.length > 0);
 }
 
+function sortConvs(convs: Conv[]): Conv[] {
+  return [...convs].sort((a, b) => {
+    if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1;
+    if (a.pinned && b.pinned) return (b.pinnedAt || 0) - (a.pinnedAt || 0);
+    return b.updatedAt - a.updatedAt;
+  });
+}
+
 function trim(convs: Conv[]): Conv[] {
-  return convs.slice(0, 50).map((conv) => ({ ...conv, messages: conv.messages.slice(-200) }));
+  return sortConvs(convs).slice(0, 50).map((conv) => ({ ...conv, messages: conv.messages.slice(-200) }));
 }
 
 function titleFrom(text: string): string {
@@ -613,8 +849,94 @@ function titleFrom(text: string): string {
   return clean.length > 18 ? `${clean.slice(0, 18)}…` : clean;
 }
 
-function storageKey(username: string): string {
-  return `xd-customer:${username}`;
+function mergeList(prev: Conv[], items: ConvMeta[], renaming: string): Conv[] {
+  const local = new Map(prev.map((conv) => [conv.id, conv]));
+  const ids = new Set(items.map((item) => item.id));
+  const merged = items.map((item) => {
+    const old = local.get(item.id);
+    if (!old) return { ...item, messages: [] };
+    return {
+      ...old,
+      title: renaming === item.id ? old.title : item.title,
+      renamed: item.renamed,
+      pinned: item.pinned,
+      pinnedAt: item.pinnedAt || 0,
+      updatedAt: item.updatedAt,
+    };
+  });
+  const fresh = prev.filter((conv) => !ids.has(conv.id) && Date.now() - conv.updatedAt < 15000);
+  return sortConvs([...fresh, ...merged]);
+}
+
+function mergeMessages(local: ChatMessage[], remote: ChatMessage[]): ChatMessage[] {
+  const merged = remote.map((item) => ({ ...item }));
+  const indexOf = (message: ChatMessage) =>
+    merged.findIndex(
+      (item) =>
+        (message.streamId && item.streamId === message.streamId) ||
+        (message.clientMsgId && item.clientMsgId === message.clientMsgId) ||
+        item.id === message.id,
+    );
+  for (const message of local) {
+    const found = indexOf(message);
+    if (found < 0) {
+      merged.push(message);
+      continue;
+    }
+    const current = merged[found];
+    if ((message.pending || message.streaming) && message.text.length > current.text.length) {
+      merged[found] = { ...current, text: message.text, pending: message.pending, streaming: message.streaming };
+    }
+  }
+  return merged.slice(-200);
+}
+
+function PinMark() {
+  return (
+    <svg className="pin-mark" width="12" height="12" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M6 2.5h4l-.6 3.2 2.1 2.1H8.8V13L8 14l-.8-1V7.8H4.5l2.1-2.1L6 2.5z" fill="currentColor" />
+    </svg>
+  );
+}
+
+function Pencil() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M9.2 3.2l3.6 3.6L5.4 14H1.8v-3.6L9.2 3.2zM8.2 4.2l-5.2 5.2V13h3.6l5.2-5.2-3.6-3.6z" fill="currentColor" />
+    </svg>
+  );
+}
+
+function PinIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M6 1.8h4l-.7 3.4 2.4 2.3H8.9V13L8 14.2 7.1 13V7.5H4.3l2.4-2.3L6 1.8z" fill="currentColor" />
+    </svg>
+  );
+}
+
+function ShareIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M6.2 5.2L8 3.4 9.8 5.2M8 3.8V9.6M4.2 8.2v4.2h7.6V8.2" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function Checks() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M2 4.5h2.2M6.2 4.5H14M2 8h2.2M6.2 8H14M2 11.5h2.2M6.2 11.5H14" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function Trash() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M3.2 4.2h9.6M6.2 4.1V2.8h3.6v1.3M4.4 4.2l.6 9h5.9l.6-9" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
 }
 
 function Plus() {
