@@ -4,13 +4,25 @@ import { useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { Mark } from "./mark";
 import { RichText } from "./rich-text";
-import { blankMessage, mergeMessage, newId, type ChatMessage, type ServerFrame, type UpstreamState } from "../shared/protocol";
+import { fetchUploadCredential, postQiniu } from "./upload";
+import { blankMessage, mergeMessage, newId, type ChatAttachment, type ChatMessage, type ServerFrame, type UpstreamState } from "../shared/protocol";
 import { nextSnowflake } from "../shared/snowflake";
+import { DEFAULT_MAX_BYTES, displayFileName, extensionOf, formatBytes, formatMaxLabel, isImageFile, MAX_ATTACHMENTS } from "../shared/upload";
 
 type User = { userId: string; username: string; displayName: string; roleCode: string };
 type ConvMeta = { id: string; title: string; updatedAt: number; renamed?: boolean; pinned?: boolean; pinnedAt?: number };
 type Conv = ConvMeta & { messages: ChatMessage[] };
-type DraftFile = { name: string; mime: string; dataBase64: string };
+type DraftFile = {
+  id: string;
+  name: string;
+  mime: string;
+  size: number;
+  status: "uploading" | "ready" | "error";
+  percent: number;
+  url: string;
+  preview: string;
+  error: string;
+};
 type Confirming = { requestId: string; conversationId: string; quote: string };
 type Project = { id: string; name: string; code: string; status: number };
 
@@ -31,7 +43,9 @@ export function ChatApp() {
   const [nav, setNav] = useState(true);
   const [error, setError] = useState("");
   const [confirming, setConfirming] = useState<Confirming | null>(null);
-  const [file, setFile] = useState<DraftFile | null>(null);
+  const [files, setFiles] = useState<DraftFile[]>([]);
+  const [maxBytes, setMaxBytes] = useState(DEFAULT_MAX_BYTES);
+  const [maxLabel, setMaxLabel] = useState(formatMaxLabel(DEFAULT_MAX_BYTES));
   const [menuId, setMenuId] = useState("");
   const [menuPos, setMenuPos] = useState({ top: 0, left: 0 });
   const [renameId, setRenameId] = useState("");
@@ -46,6 +60,12 @@ export function ChatApp() {
   const threadRef = useRef<HTMLDivElement | null>(null);
   const boxRef = useRef<HTMLTextAreaElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
+  const filesRef = useRef(files);
+  filesRef.current = files;
+  const maxBytesRef = useRef(maxBytes);
+  maxBytesRef.current = maxBytes;
+  const maxLabelRef = useRef(maxLabel);
+  maxLabelRef.current = maxLabel;
   const renameIdRef = useRef("");
   const holdRef = useRef(false);
   renameIdRef.current = renameId;
@@ -132,6 +152,14 @@ export function ChatApp() {
 
   useEffect(() => {
     if (!user) return;
+    fetch("/api/upload/config")
+      .then(async (res) => (res.ok ? ((await res.json()) as { maxBytes?: number; maxLabel?: string }) : null))
+      .then((data) => {
+        if (!data || typeof data.maxBytes !== "number" || data.maxBytes <= 0) return;
+        setMaxBytes(data.maxBytes);
+        setMaxLabel(data.maxLabel || formatMaxLabel(data.maxBytes));
+      })
+      .catch(() => undefined);
     fetch("/api/projects")
       .then(async (res) => (res.ok ? ((await res.json()) as { items?: Project[] }) : { items: [] }))
       .then((data) => setProjects(Array.isArray(data.items) ? data.items.filter((item) => item.status !== 0) : []))
@@ -233,18 +261,25 @@ export function ChatApp() {
       setError("连接已断开，这句话还没发出");
       return;
     }
-    if (!text && !file) return;
+    if (files.some((item) => item.status === "uploading")) {
+      setError("附件还在上传");
+      return;
+    }
+    if (files.some((item) => item.status === "error")) {
+      setError("有附件上传失败，请移除后再发");
+      return;
+    }
+    const attachments = files.filter((item) => item.status === "ready" && item.url).map((item) => ({ name: item.name, mime: item.mime, url: item.url, size: item.size }));
+    if (!text && !attachments.length) return;
     const conversationId = activeId || newId();
     const clientMsgId = newId();
     const projectIds = pickedIds.filter((id) => {
       const found = projects.find((item) => item.id === id);
       return !found || found.status !== 0;
     });
-    const linked = { projectId: projectIds[0] || "", projectIds, problemId: projectIds.length ? nextSnowflake() : "" };
+    const linked = { projectId: projectIds[0] || "", projectIds, problemId: projectIds.length ? nextSnowflake() : "", attachments };
     if (!activeId) setActiveId(conversationId);
-    if (file) {
-      socket.send(JSON.stringify({ type: "file", conversationId, clientMsgId, text, name: file.name, mime: file.mime, dataBase64: file.dataBase64, ...linked }));
-    } else if (confirm) {
+    if (confirm) {
       socket.send(
         JSON.stringify({
           type: "confirm",
@@ -256,13 +291,15 @@ export function ChatApp() {
           projectId: linked.projectId,
           projectIds: linked.projectIds,
           problemId: linked.problemId,
+          attachments,
         }),
       );
     } else {
       socket.send(JSON.stringify({ type: "send", conversationId, clientMsgId, text, ...linked }));
     }
     setDraft("");
-    setFile(null);
+    releaseFiles(files);
+    setFiles([]);
     setConfirming(null);
     setError("");
     holdRef.current = true;
@@ -297,21 +334,73 @@ export function ChatApp() {
     setHold(true);
   }
 
-  function onFile(list: FileList | null) {
-    const picked = list?.[0];
-    if (!picked) return;
-    if (picked.size > 1_500_000) {
-      setError("附件不能超过 1.5MB");
+  function addFiles(list: File[]) {
+    const room = MAX_ATTACHMENTS - filesRef.current.length;
+    if (room <= 0) {
+      setError(`一次最多 ${MAX_ATTACHMENTS} 个附件`);
       return;
     }
-    const reader = new FileReader();
-    reader.onload = () => {
-      const result = String(reader.result || "");
-      const dataBase64 = result.slice(result.indexOf(",") + 1);
-      setFile({ name: picked.name, mime: picked.type || "application/octet-stream", dataBase64 });
-    };
-    reader.readAsDataURL(picked);
+    const incoming = list.slice(0, room);
+    if (list.length > room) setError(`一次最多 ${MAX_ATTACHMENTS} 个附件`);
+    const accepted: Array<{ draft: DraftFile; file: File }> = [];
+    for (const file of incoming) {
+      const ext = extensionOf(file.name, file.type);
+      const label = file.name || "这个文件";
+      if (!ext) {
+        setError(`不支持的文件类型：${label}`);
+        continue;
+      }
+      if (file.size <= 0) {
+        setError("文件是空的");
+        continue;
+      }
+      if (file.size > maxBytesRef.current) {
+        setError(`文件不能超过 ${maxLabelRef.current}`);
+        continue;
+      }
+      const name = displayFileName(file.name, ext);
+      const preview = file.type.startsWith("image/") || isImageFile(file.type, name) ? URL.createObjectURL(file) : "";
+      accepted.push({
+        file,
+        draft: {
+          id: newId(),
+          name,
+          mime: file.type || "application/octet-stream",
+          size: file.size,
+          status: "uploading",
+          percent: 0,
+          url: "",
+          preview,
+          error: "",
+        },
+      });
+    }
+    if (!accepted.length) return;
+    setFiles((prev) => [...prev, ...accepted.map((item) => item.draft)]);
+    for (const item of accepted) void uploadDraft(item.draft.id, item.file);
     if (fileRef.current) fileRef.current.value = "";
+  }
+
+  async function uploadDraft(id: string, file: File) {
+    try {
+      const creds = await fetchUploadCredential(file);
+      await postQiniu(file, creds, (percent) => {
+        setFiles((prev) => prev.map((item) => (item.id === id ? { ...item, percent } : item)));
+      });
+      setFiles((prev) => prev.map((item) => (item.id === id ? { ...item, status: "ready", percent: 100, url: creds.publicUrl } : item)));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "上传失败，请稍后重试";
+      setFiles((prev) => prev.map((item) => (item.id === id ? { ...item, status: "error", error: message } : item)));
+      setError(message);
+    }
+  }
+
+  function removeFile(id: string) {
+    setFiles((prev) => {
+      const found = prev.find((item) => item.id === id);
+      if (found?.preview) URL.revokeObjectURL(found.preview);
+      return prev.filter((item) => item.id !== id);
+    });
   }
 
   function openMenu(event: { stopPropagation: () => void; currentTarget: HTMLButtonElement }, id: string) {
@@ -547,8 +636,9 @@ export function ChatApp() {
               draft={draft}
               setDraft={setDraft}
               boxRef={boxRef}
-              file={file}
-              clearFile={() => setFile(null)}
+              files={files}
+              maxLabel={maxLabel}
+              removeFile={removeFile}
               confirming={confirming}
               clearConfirm={() => setConfirming(null)}
               error={error}
@@ -558,7 +648,7 @@ export function ChatApp() {
               pickedIds={pickedIds}
               onToggle={toggleProject}
               fileRef={fileRef}
-              onFile={onFile}
+              onAddFiles={addFiles}
               onSend={() => send()}
               waiting={waiting}
             />
@@ -584,8 +674,9 @@ export function ChatApp() {
                 draft={draft}
                 setDraft={setDraft}
                 boxRef={boxRef}
-                file={file}
-                clearFile={() => setFile(null)}
+                files={files}
+                maxLabel={maxLabel}
+                removeFile={removeFile}
                 confirming={confirming}
                 clearConfirm={() => setConfirming(null)}
                 error={error}
@@ -595,7 +686,7 @@ export function ChatApp() {
                 pickedIds={pickedIds}
                 onToggle={toggleProject}
                 fileRef={fileRef}
-                onFile={onFile}
+                onAddFiles={addFiles}
                 onSend={() => send()}
                 waiting={waiting}
               />
@@ -620,31 +711,35 @@ function MessageView({
 }) {
   if (message.role === "user") {
     return (
-      <article className="msg-user" title={message.time}>
-        <div className="bubble">
-          <RichText text={message.text} />
-          {message.fileName ? <div className="file-chip">{message.fileName}</div> : null}
-          {message.pending ? <div className="pending">待送达，通道恢复后会自动发出</div> : null}
+      <article className="msg-user">
+        <div className="msg-col">
+          <div className="bubble">
+            {captionOf(message) ? <RichText text={captionOf(message)} /> : null}
+            <AttachmentList message={message} />
+            {message.pending ? <div className="pending">待送达，通道恢复后会自动发出</div> : null}
+          </div>
+          <MessageTime time={message.time} />
         </div>
       </article>
     );
   }
   const decided = message.requestId ? messages.some((item) => item.requestId === message.requestId && item.decision) : false;
   return (
-    <article className="msg-ai" title={message.time}>
+    <article className="msg-ai">
       <Mark size={28} />
       <div className="ai-body">
         {message.kind === "confirm" ? <div className="card-kicker">需要你确认</div> : null}
         {message.kind === "progress" ? <div className="card-kicker">{message.stage || "进展"}</div> : null}
         {message.kind === "result" ? <div className="card-kicker">结果</div> : null}
-        <RichText text={message.text} />
+        {captionOf(message) ? <RichText text={captionOf(message)} /> : null}
+        <AttachmentList message={message} />
         {message.streaming ? <span className="cursor" /> : null}
         {message.kind === "progress" && message.percent >= 0 ? (
           <div className="bar" aria-valuenow={message.percent} aria-valuemin={0} aria-valuemax={100} role="progressbar">
             <span style={{ width: `${message.percent}%` }} />
           </div>
         ) : null}
-        {message.url ? (
+        {message.url && !listedAttachments(message).some((item) => item.url === message.url) ? (
           <a className="result-link" href={message.url} target="_blank" rel="noreferrer">
             {message.kind === "file" ? "打开文件" : "打开结果"}
           </a>
@@ -663,8 +758,41 @@ function MessageView({
             </button>
           </div>
         ) : null}
+        <MessageTime time={message.time} />
       </div>
     </article>
+  );
+}
+
+function MessageTime({ time }: { time: string }) {
+  const text = displayTime(time);
+  if (!text) return null;
+  return <time className="msg-time" dateTime={text}>{text}</time>;
+}
+
+function displayTime(value: string): string {
+  const matched = value.trim().match(/^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})/);
+  return matched ? `${matched[1]} ${matched[2]}` : "";
+}
+
+function AttachmentList({ message }: { message: ChatMessage }) {
+  const items = listedAttachments(message);
+  if (!items.length) return null;
+  return (
+    <div className="attach-list">
+      {items.map((item) =>
+        isImageFile(item.mime, item.name) ? (
+          <a key={item.url} className="attach-shot" href={item.url} target="_blank" rel="noreferrer">
+            <img src={item.url} alt={item.name} />
+          </a>
+        ) : (
+          <a key={item.url} className="file-chip" href={item.url} target="_blank" rel="noreferrer">
+            <span>{item.name}</span>
+            {item.size > 0 ? <small>{formatBytes(item.size)}</small> : null}
+          </a>
+        ),
+      )}
+    </div>
   );
 }
 
@@ -672,8 +800,9 @@ function Composer({
   draft,
   setDraft,
   boxRef,
-  file,
-  clearFile,
+  files,
+  maxLabel,
+  removeFile,
   confirming,
   clearConfirm,
   error,
@@ -683,15 +812,16 @@ function Composer({
   pickedIds,
   onToggle,
   fileRef,
-  onFile,
+  onAddFiles,
   onSend,
   waiting,
 }: {
   draft: string;
   setDraft: (value: string) => void;
   boxRef: { current: HTMLTextAreaElement | null };
-  file: DraftFile | null;
-  clearFile: () => void;
+  files: DraftFile[];
+  maxLabel: string;
+  removeFile: (id: string) => void;
   confirming: Confirming | null;
   clearConfirm: () => void;
   error: string;
@@ -701,7 +831,7 @@ function Composer({
   pickedIds: string[];
   onToggle: (id: string) => void;
   fileRef: { current: HTMLInputElement | null };
-  onFile: (list: FileList | null) => void;
+  onAddFiles: (files: File[]) => void;
   onSend: () => void;
   waiting: boolean;
 }) {
@@ -718,12 +848,31 @@ function Composer({
         </div>
       ) : null}
       <div className="composer">
-        {file ? (
-          <div className="file-chip">
-            {file.name}
-            <button type="button" onClick={clearFile} aria-label="移除附件">
-              ×
-            </button>
+        {files.length ? (
+          <div className="attach-row">
+            {files.map((item) =>
+              item.preview ? (
+                <div key={item.id} className={item.status === "error" ? "attach-thumb bad" : "attach-thumb"} title={item.error || item.name}>
+                  <img src={item.preview} alt={item.name} />
+                  {item.status === "uploading" ? (
+                    <i className="progress" aria-hidden="true">
+                      <span style={{ width: `${item.percent}%` }} />
+                    </i>
+                  ) : null}
+                  <button type="button" className="remove" onClick={() => removeFile(item.id)} aria-label={`移除${item.name}`}>
+                    ×
+                  </button>
+                </div>
+              ) : (
+                <div key={item.id} className={item.status === "error" ? "file-chip bad" : "file-chip"} title={item.error || ""}>
+                  <span>{item.name}</span>
+                  <small>{item.status === "uploading" ? `${item.percent}%` : formatBytes(item.size)}</small>
+                  <button type="button" onClick={() => removeFile(item.id)} aria-label={`移除${item.name}`}>
+                    ×
+                  </button>
+                </div>
+              ),
+            )}
           </div>
         ) : null}
         {picked.length ? (
@@ -747,6 +896,14 @@ function Composer({
             event.target.style.height = "0px";
             event.target.style.height = `${Math.min(180, event.target.scrollHeight)}px`;
           }}
+          onPaste={(event) => {
+            const picked = filesFromClipboard(event.clipboardData);
+            if (!picked.length) return;
+            event.preventDefault();
+            const pasted = event.clipboardData?.getData("text/plain") || "";
+            if (pasted) insertText(event.currentTarget, pasted, setDraft);
+            onAddFiles(picked);
+          }}
           onKeyDown={(event) => {
             if (event.key === "Enter" && !event.shiftKey) {
               event.preventDefault();
@@ -756,15 +913,25 @@ function Composer({
         />
         <div className="composer-bar">
           <div className="composer-tools">
-            <button type="button" className="icon-btn" aria-label="添加附件" onClick={() => fileRef.current?.click()}>
+            <button type="button" className="icon-btn" aria-label={`添加附件，单个不超过 ${maxLabel}`} title={`单个文件不超过 ${maxLabel}`} onClick={() => fileRef.current?.click()}>
               <Clip />
             </button>
-            <input ref={fileRef} type="file" hidden onChange={(event) => onFile(event.target.files)} />
+            <span className="size-limit">{maxLabel}</span>
+            <input
+              ref={fileRef}
+              type="file"
+              multiple
+              hidden
+              onChange={(event) => {
+                onAddFiles(filesFromList(event.target.files));
+                event.target.value = "";
+              }}
+            />
             <button type="button" className={showLink || picked.length ? "text-btn on" : "text-btn"} onClick={() => setShowLink(!showLink)}>
               关联项目{picked.length ? ` · ${picked.length}` : ""}
             </button>
           </div>
-          <button className="send" type="button" aria-label={waiting ? "等待回复" : "发送"} disabled={waiting || (!draft.trim() && !file)} onClick={onSend}>
+          <button className="send" type="button" aria-label={waiting ? "等待回复" : "发送"} disabled={waiting || files.some((item) => item.status === "uploading") || (!draft.trim() && !files.some((item) => item.status === "ready"))} onClick={onSend}>
             <Arrow />
           </button>
         </div>
@@ -793,6 +960,63 @@ function Composer({
       </div>
     </div>
   );
+}
+
+function releaseFiles(items: DraftFile[]) {
+  for (const item of items) {
+    if (item.preview) URL.revokeObjectURL(item.preview);
+  }
+}
+
+function filesFromList(list: FileList | null | undefined): File[] {
+  return list ? Array.from(list) : [];
+}
+
+function filesFromClipboard(data: DataTransfer | null): File[] {
+  const fromFiles = filesFromList(data?.files);
+  if (fromFiles.length) return fromFiles;
+  if (!data) return [];
+  const list: File[] = [];
+  for (const item of data.items) {
+    if (item.kind !== "file") continue;
+    const file = item.getAsFile();
+    if (file) list.push(file);
+  }
+  return list;
+}
+
+function insertText(box: HTMLTextAreaElement, extra: string, setDraft: (value: string) => void) {
+  const start = box.selectionStart ?? box.value.length;
+  const end = box.selectionEnd ?? box.value.length;
+  const next = `${box.value.slice(0, start)}${extra}${box.value.slice(end)}`;
+  setDraft(next);
+  window.requestAnimationFrame(() => {
+    box.selectionStart = start + extra.length;
+    box.selectionEnd = start + extra.length;
+    box.style.height = "0px";
+    box.style.height = `${Math.min(180, box.scrollHeight)}px`;
+  });
+}
+
+function captionOf(message: ChatMessage): string {
+  const text = message.text.trim();
+  const items = listedAttachments(message);
+  if (!text || !items.length) return message.text;
+  const names = items.map((item) => item.name).join("、");
+  if (text === names || (items.length === 1 && text === items[0].name)) return "";
+  return message.text;
+}
+
+function listedAttachments(message: ChatMessage): ChatAttachment[] {
+  if (Array.isArray(message.attachments) && message.attachments.length) return message.attachments;
+  if (message.url && (message.role === "user" || message.kind === "file")) {
+    return [{ name: message.fileName || "附件", mime: "", url: message.url, size: 0 }];
+  }
+  return [];
+}
+
+function normalizeMessage(message: ChatMessage): ChatMessage {
+  return { ...message, attachments: Array.isArray(message.attachments) ? message.attachments : [] };
 }
 
 function inOpenConversation(message: ChatMessage, activeId: string): ChatMessage {
@@ -903,7 +1127,7 @@ function mergeList(prev: Conv[], items: ConvMeta[], renaming: string): Conv[] {
 }
 
 function mergeMessages(local: ChatMessage[], remote: ChatMessage[]): ChatMessage[] {
-  const merged = remote.map((item) => ({ ...item }));
+  const merged = remote.map((item) => normalizeMessage(item));
   const indexOf = (message: ChatMessage) =>
     merged.findIndex(
       (item) =>
@@ -914,10 +1138,15 @@ function mergeMessages(local: ChatMessage[], remote: ChatMessage[]): ChatMessage
   for (const message of local) {
     const found = indexOf(message);
     if (found < 0) {
-      merged.push(message);
+      merged.push(normalizeMessage(message));
       continue;
     }
     const current = merged[found];
+    const remoteItems = Array.isArray(current.attachments) ? current.attachments : [];
+    const localItems = Array.isArray(message.attachments) ? message.attachments : [];
+    if (!remoteItems.length && localItems.length) current.attachments = localItems;
+    if (!current.url && message.url) current.url = message.url;
+    if (!current.fileName && message.fileName) current.fileName = message.fileName;
     if ((message.pending || message.streaming) && message.text.length > current.text.length) {
       merged[found] = { ...current, text: message.text, pending: message.pending, streaming: message.streaming };
     }

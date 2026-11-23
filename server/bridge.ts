@@ -10,14 +10,16 @@ import {
   type ServerFrame,
   type UpstreamState,
 } from "../shared/protocol";
+import { attachmentError } from "./qiniu";
 import type { Session } from "./session";
 
 const QUEUE_LIMIT = 20;
 
 export function attachBridge(browser: WebSocket, session: Session) {
   let upstream: WebSocket | undefined;
-  let upstreamState: UpstreamState = "connecting";
+  let upstreamState: UpstreamState = session.frpToken ? "connecting" : "down";
   let closed = false;
+  let blocked = !session.frpToken;
   let retry = 0;
   let attempt = 0;
   let conversationId = "";
@@ -33,14 +35,20 @@ export function attachBridge(browser: WebSocket, session: Session) {
   };
 
   const connect = () => {
-    if (closed) return;
+    if (closed || blocked) return;
     const current = ++attempt;
     setStatus("connecting");
-    const ws = new WebSocket(upstreamUrl(session.userId));
+    const ws = new WebSocket(upstreamUrl(session.userId), {
+      headers: { Authorization: `Bearer ${session.frpToken}` },
+    });
     upstream = ws;
     const timeout = setTimeout(() => {
       ws.terminate();
     }, Number(process.env.FRP_CONNECT_TIMEOUT_MS || 8000));
+    ws.on("unexpected-response", (_request, response) => {
+      response.resume();
+      if (response.statusCode === 401) blocked = true;
+    });
     ws.on("open", () => {
       if (current !== attempt) return;
       clearTimeout(timeout);
@@ -81,6 +89,10 @@ export function attachBridge(browser: WebSocket, session: Session) {
       if (upstream === ws) upstream = undefined;
       if (closed || current !== attempt) return;
       setStatus("down");
+      if (blocked) {
+        sendBrowser({ type: "error", error: "登录已失效，请重新登录", clientMsgId: "" });
+        return;
+      }
       const wait = Math.min(15000, 1000 * 2 ** retry);
       retry += 1;
       setTimeout(connect, wait);
@@ -108,12 +120,17 @@ export function attachBridge(browser: WebSocket, session: Session) {
       sendBrowser({ type: "pong" });
       return;
     }
-    conversationId = frame.conversationId;
-    const parts = outbound(frame, session);
-    if (!parts) {
-      sendBrowser({ type: "error", error: "附件不能超过 1.5MB", clientMsgId: frame.clientMsgId });
+    if (blocked) {
+      sendBrowser({ type: "error", error: "登录已失效，请重新登录", clientMsgId: frame.clientMsgId });
       return;
     }
+    conversationId = frame.conversationId;
+    const invalid = attachmentError(frame.attachments);
+    if (invalid) {
+      sendBrowser({ type: "error", error: invalid, clientMsgId: frame.clientMsgId });
+      return;
+    }
+    const parts = outbound(frame, session);
     const open = Boolean(upstream && upstream.readyState === WebSocket.OPEN);
     if (!open && queue.length >= QUEUE_LIMIT) {
       sendBrowser({ type: "error", error: "通道排队已满，请稍后再发", clientMsgId: frame.clientMsgId });
@@ -139,61 +156,34 @@ export function attachBridge(browser: WebSocket, session: Session) {
     userId: session.userId,
     username: session.username,
     displayName: session.displayName,
-    upstream: "connecting",
+    upstream: upstreamState,
   });
-  connect();
+  if (!blocked) connect();
 }
 
-function outbound(frame: Exclude<ClientFrame, { type: "ping" }>, session: Session): { echo: ReturnType<typeof blankMessage>; wire: Array<string | Buffer> } | undefined {
+function outbound(frame: Exclude<ClientFrame, { type: "ping" }>, session: Session): { echo: ReturnType<typeof blankMessage>; wire: Array<string | Buffer> } {
   const time = shanghaiNow();
-  if (frame.type === "file") {
-    const bytes = decodeFile(frame.dataBase64);
-    if (!bytes) return undefined;
-    const text = frame.text || `请看附件 ${frame.name}`;
-    return {
-      echo: blankMessage({
-        id: frame.clientMsgId,
-        clientMsgId: frame.clientMsgId,
-        conversationId: frame.conversationId,
-        role: "user",
-        kind: "file",
-        text,
-        time,
-        projectId: frame.projectId,
-        problemId: frame.problemId,
-        fileName: frame.name,
-        pending: true,
-      }),
-      wire: [
-        buildFrpPayload({
-          kind: "file",
-          conversationId: frame.conversationId,
-          clientMsgId: frame.clientMsgId,
-          body: text,
-          projectId: frame.projectId,
-          projectIds: frame.projectIds,
-          problemId: frame.problemId,
-          accountId: session.accountId,
-          fileName: frame.name,
-        }),
-        bytes,
-      ],
-    };
-  }
-  const kind = frame.type === "confirm" ? "confirm" : "user";
+  const attachments = frame.attachments;
+  const first = attachments[0];
+  const names = attachments.map((item) => item.name).join("、");
+  const body = frame.text || names;
+  const kind = frame.type === "confirm" ? "confirm" : frame.text ? "user" : "file";
   return {
     echo: blankMessage({
       id: frame.clientMsgId,
       clientMsgId: frame.clientMsgId,
       conversationId: frame.conversationId,
       role: "user",
-      kind: frame.type === "confirm" ? "confirm" : "chat",
-      text: frame.text,
+      kind: frame.type === "confirm" ? "confirm" : frame.text ? "chat" : "file",
+      text: body,
       time,
       projectId: frame.projectId,
       problemId: frame.problemId,
       requestId: frame.type === "confirm" ? frame.requestId : "",
       decision: frame.type === "confirm" ? frame.decision : "",
+      fileName: first?.name || "",
+      url: first?.url || "",
+      attachments,
       pending: true,
     }),
     wire: [
@@ -201,23 +191,21 @@ function outbound(frame: Exclude<ClientFrame, { type: "ping" }>, session: Sessio
         kind,
         conversationId: frame.conversationId,
         clientMsgId: frame.clientMsgId,
-        body: frame.text,
+        body,
         projectId: frame.projectId,
         projectIds: frame.projectIds,
         problemId: frame.problemId,
         accountId: session.accountId,
         requestId: frame.type === "confirm" ? frame.requestId : "",
         decision: frame.type === "confirm" ? frame.decision : "",
+        fileName: first?.name || "",
+        url: first?.url || "",
+        mime: first?.mime || "",
+        size: first?.size || 0,
+        attachments,
       }),
     ],
   };
-}
-
-function decodeFile(dataBase64: string): Buffer | undefined {
-  if (dataBase64.length > 2_100_000 || !/^[A-Za-z0-9+/=\r\n]+$/.test(dataBase64)) return undefined;
-  const bytes = Buffer.from(dataBase64, "base64");
-  if (bytes.length === 0 || bytes.length > 1_500_000) return undefined;
-  return bytes;
 }
 
 function upstreamUrl(userId: string): string {

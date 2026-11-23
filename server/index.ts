@@ -8,6 +8,7 @@ import { isAdminApi, proxyAdmin } from "./admin-proxy";
 import { handleLogin, handleLogout, handleMe, sendJson } from "./auth";
 import { attachBridge } from "./bridge";
 import { readSession } from "./session";
+import { handleUpload } from "./upload";
 
 const dev = process.env.NODE_ENV !== "production";
 const app = next({ dev });
@@ -31,6 +32,10 @@ async function main() {
     }
     if (pathname === "/api/auth/me" && req.method === "GET") {
       handleMe(req, res).catch(() => sendJson(res, 500, { error: "暂时无法确认登录状态" }));
+      return;
+    }
+    if (pathname === "/api/upload/config" || pathname === "/api/upload/token") {
+      handleUpload(req, res).catch(() => sendJson(res, 400, { error: "请求无法识别" }));
       return;
     }
     if (isAdminApi(pathname)) {

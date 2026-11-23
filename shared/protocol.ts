@@ -6,6 +6,13 @@ export type ChatKind = "chat" | "confirm" | "progress" | "result" | "file";
 
 export type ChatRole = "user" | "assistant" | "system";
 
+export type ChatAttachment = {
+  name: string;
+  mime: string;
+  url: string;
+  size: number;
+};
+
 export type ChatMessage = {
   id: string;
   clientMsgId: string;
@@ -22,6 +29,7 @@ export type ChatMessage = {
   streamId: string;
   decision: "" | "accept" | "reject";
   fileName: string;
+  attachments: ChatAttachment[];
   percent: number;
   pending: boolean;
   streaming: boolean;
@@ -37,6 +45,7 @@ export type ClientFrame =
       projectId: string;
       projectIds: string[];
       problemId: string;
+      attachments: ChatAttachment[];
     }
   | {
       type: "confirm";
@@ -48,18 +57,7 @@ export type ClientFrame =
       problemId: string;
       requestId: string;
       decision: "accept" | "reject";
-    }
-  | {
-      type: "file";
-      conversationId: string;
-      clientMsgId: string;
-      text: string;
-      projectId: string;
-      projectIds: string[];
-      problemId: string;
-      name: string;
-      mime: string;
-      dataBase64: string;
+      attachments: ChatAttachment[];
     };
 
 export type ServerFrame =
@@ -100,7 +98,7 @@ export function shanghaiNow(date = new Date()): string {
 }
 
 export function blankMessage(partial: Partial<ChatMessage> & Pick<ChatMessage, "id" | "conversationId" | "role" | "text">): ChatMessage {
-  return {
+  const message: ChatMessage = {
     clientMsgId: partial.id,
     kind: "chat",
     time: "",
@@ -112,11 +110,14 @@ export function blankMessage(partial: Partial<ChatMessage> & Pick<ChatMessage, "
     streamId: "",
     decision: "",
     fileName: "",
+    attachments: [],
     percent: -1,
     pending: false,
     streaming: false,
     ...partial,
   };
+  if (!Array.isArray(message.attachments)) message.attachments = [];
+  return message;
 }
 
 export function parseClientFrame(value: unknown): ClientFrame | undefined {
@@ -129,25 +130,19 @@ export function parseClientFrame(value: unknown): ClientFrame | undefined {
   const projectIds = projectList(frame);
   const projectId = projectIds[0] || clip(frame.projectId, 64);
   const problemId = clip(frame.problemId, 64);
+  const attachments = attachmentsOf(frame.attachments);
+  const linked = { projectId, projectIds: projectIds.length ? projectIds : projectId ? [projectId] : [], problemId };
   if (frame.type === "send") {
     const text = clip(frame.text, 8000);
-    if (!text) return undefined;
-    return { type: "send", conversationId, clientMsgId, text, projectId, projectIds: projectIds.length ? projectIds : projectId ? [projectId] : [], problemId };
+    if (!text && !attachments.length) return undefined;
+    return { type: "send", conversationId, clientMsgId, text, ...linked, attachments };
   }
   if (frame.type === "confirm") {
     const decision = frame.decision === "accept" || frame.decision === "reject" ? frame.decision : "";
     const requestId = clipId(frame.requestId, LOOSE_RE);
     const text = clip(frame.text, 8000) || (decision === "accept" ? "同意" : "");
     if (!decision || !requestId || !text) return undefined;
-    return { type: "confirm", conversationId, clientMsgId, text, projectId, projectIds: projectIds.length ? projectIds : projectId ? [projectId] : [], problemId, requestId, decision };
-  }
-  if (frame.type === "file") {
-    const name = clip(frame.name, 120);
-    const mime = clip(frame.mime, 120) || "application/octet-stream";
-    const dataBase64 = typeof frame.dataBase64 === "string" ? frame.dataBase64 : "";
-    const text = clip(frame.text, 8000);
-    if (!name || !dataBase64) return undefined;
-    return { type: "file", conversationId, clientMsgId, text, projectId, projectIds: projectIds.length ? projectIds : projectId ? [projectId] : [], problemId, name, mime, dataBase64 };
+    return { type: "confirm", conversationId, clientMsgId, text, ...linked, requestId, decision, attachments };
   }
   return undefined;
 }
@@ -164,7 +159,13 @@ export function buildFrpPayload(input: {
   requestId?: string;
   decision?: string;
   fileName?: string;
+  url?: string;
+  mime?: string;
+  size?: number;
+  attachments?: ChatAttachment[];
 }): string {
+  const attachments = input.attachments || [];
+  const first = attachments[0];
   // frp 遇到 text 或字符串 content 时只保存那一段，kind、conversationId 会丢掉。这两个字段名不能出现。
   return JSON.stringify({
     msgType: "json",
@@ -178,7 +179,11 @@ export function buildFrpPayload(input: {
     accountId: input.accountId,
     requestId: input.requestId || "",
     decision: input.decision || "",
-    fileName: input.fileName || "",
+    fileName: input.fileName || first?.name || "",
+    url: input.url || first?.url || "",
+    mime: input.mime || first?.mime || "",
+    size: input.size || first?.size || 0,
+    attachments,
     toUserId: "internal",
   });
 }
@@ -246,8 +251,9 @@ export function fromFrpSaved(saved: Saved, selfUserId: string): { type: "message
   const streamId = clipId(payload.streamId, LOOSE_RE);
   const decision = payload.decision === "accept" || payload.decision === "reject" ? payload.decision : "";
   const stage = clip(payload.stage, 40);
-  const url = clip(payload.url, 512);
-  const fileName = clip(payload.fileName, 120);
+  const attachments = attachmentsOf(payload.attachments);
+  const url = clip(payload.url, 512) || attachments[0]?.url || "";
+  const fileName = clip(payload.fileName, 120) || attachments[0]?.name || "";
   const percent = percentOf(payload.percent);
   const message = blankMessage({
     id: id || clientMsgId,
@@ -265,6 +271,7 @@ export function fromFrpSaved(saved: Saved, selfUserId: string): { type: "message
     streamId,
     decision,
     fileName,
+    attachments,
     percent,
   });
 
@@ -287,6 +294,7 @@ export function mergeMessage(prev: ChatMessage, incoming: ChatMessage): ChatMess
     decision: incoming.decision || prev.decision,
     url: incoming.url || prev.url,
     fileName: incoming.fileName || prev.fileName,
+    attachments: incoming.attachments?.length ? incoming.attachments : prev.attachments || [],
     stage: incoming.stage || prev.stage,
     percent: incoming.percent >= 0 ? incoming.percent : prev.percent,
     pending: incoming.pending && prev.pending,
@@ -333,6 +341,23 @@ function preferId(prev: string, next: string): string {
 function conversationOf(value: unknown): string {
   const id = clipId(value, CONV_RE);
   return id === "inbox" ? "" : id;
+}
+
+function attachmentsOf(value: unknown): ChatAttachment[] {
+  if (!Array.isArray(value)) return [];
+  const list: ChatAttachment[] = [];
+  for (const item of value) {
+    if (!item || typeof item !== "object") continue;
+    const row = item as Record<string, unknown>;
+    const name = clip(row.name, 120);
+    const mime = clip(row.mime, 120) || "application/octet-stream";
+    const url = clip(row.url, 512);
+    const size = typeof row.size === "number" && Number.isFinite(row.size) ? Math.round(row.size) : 0;
+    if (!name || !/^https:\/\//i.test(url) || size < 0) continue;
+    list.push({ name, mime, url, size });
+    if (list.length >= 9) break;
+  }
+  return list;
 }
 
 function projectList(frame: Record<string, unknown>): string[] {
