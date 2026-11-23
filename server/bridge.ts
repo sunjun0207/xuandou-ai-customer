@@ -20,6 +20,7 @@ export function attachBridge(browser: WebSocket, session: Session) {
   let closed = false;
   let retry = 0;
   let attempt = 0;
+  let conversationId = "";
   const queue: Array<{ echo: ChatMessage; parts: Array<string | Buffer> }> = [];
 
   const sendBrowser = (frame: ServerFrame) => {
@@ -69,6 +70,9 @@ export function attachBridge(browser: WebSocket, session: Session) {
       }
       const inbound = fromFrpSaved(saved, session.userId);
       if (!inbound) return;
+      if (inbound.message.role !== "user" && (!inbound.message.conversationId || inbound.message.conversationId === "inbox") && conversationId) {
+        inbound.message.conversationId = conversationId;
+      }
       if (inbound.type === "delta") sendBrowser({ type: "delta", message: inbound.message, done: inbound.done });
       else sendBrowser({ type: "message", message: inbound.message });
     });
@@ -104,6 +108,7 @@ export function attachBridge(browser: WebSocket, session: Session) {
       sendBrowser({ type: "pong" });
       return;
     }
+    conversationId = frame.conversationId;
     const parts = outbound(frame, session);
     if (!parts) {
       sendBrowser({ type: "error", error: "附件不能超过 1.5MB", clientMsgId: frame.clientMsgId });

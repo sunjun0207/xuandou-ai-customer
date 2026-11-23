@@ -30,6 +30,8 @@ export function ChatApp() {
   const [confirming, setConfirming] = useState<Confirming | null>(null);
   const [file, setFile] = useState<DraftFile | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const activeIdRef = useRef(activeId);
+  activeIdRef.current = activeId;
   const threadRef = useRef<HTMLDivElement | null>(null);
   const boxRef = useRef<HTMLTextAreaElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
@@ -94,8 +96,8 @@ export function ChatApp() {
           setError(frame.error);
           if (frame.clientMsgId) setConvs((prev) => removeMessage(prev, frame.clientMsgId));
         }
-        if (frame.type === "message") setConvs((prev) => applyMessage(prev, frame.message));
-        if (frame.type === "delta") setConvs((prev) => applyDelta(prev, frame.message, frame.done));
+        if (frame.type === "message") setConvs((prev) => applyMessage(prev, inOpenConversation(frame.message, activeIdRef.current)));
+        if (frame.type === "delta") setConvs((prev) => applyDelta(prev, inOpenConversation(frame.message, activeIdRef.current), frame.done));
       };
       socket.onclose = () => {
         if (wsRef.current !== socket) return;
@@ -496,6 +498,12 @@ function Composer({
       </div>
     </div>
   );
+}
+
+function inOpenConversation(message: ChatMessage, activeId: string): ChatMessage {
+  if (message.role === "user" || !activeId) return message;
+  if (message.conversationId && message.conversationId !== "inbox") return message;
+  return { ...message, conversationId: activeId };
 }
 
 function applyMessage(prev: Conv[], message: ChatMessage): Conv[] {
