@@ -7,7 +7,8 @@ ARG NPM_REGISTRY=https://registry.npmmirror.com
 COPY package.json package-lock.json* ./
 RUN npm config set registry ${NPM_REGISTRY} && npm install
 COPY . .
-RUN npm run build
+RUN chmod +x docker-entrypoint.sh && npm run build
 
 EXPOSE 4100
+ENTRYPOINT ["./docker-entrypoint.sh"]
 CMD ["npm", "start"]

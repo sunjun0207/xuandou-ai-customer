@@ -4,7 +4,7 @@ import { fileURLToPath, URL } from "node:url";
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), "");
-  const target = env.VITE_PROXY_TARGET || "http://127.0.0.1:4080";
+  const target = process.env.VITE_PROXY_TARGET || env.VITE_PROXY_TARGET || "http://127.0.0.1:4080";
   const wsTarget = target.replace(/^http/, "ws");
   return {
     plugins: [react()],
