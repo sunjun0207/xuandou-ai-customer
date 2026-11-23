@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import { Mark } from "@/components/mark";
 import { RichText } from "@/components/rich-text";
 import { apiFetch, saveSession, userFrom, wsUrl, endSession, ensureSession, sessionLeaving, watchSession } from "@/api/session";
@@ -60,6 +60,8 @@ export function ChatApp() {
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
   const threadRef = useRef<HTMLDivElement | null>(null);
+  const stickRef = useRef(true);
+  const pinningRef = useRef(false);
   const boxRef = useRef<HTMLTextAreaElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const filesRef = useRef(files);
@@ -139,8 +141,8 @@ export function ChatApp() {
       const detail = await apiFetch(`/api/conversations/${encodeURIComponent(current)}`);
       if (stop || !detail.ok) return;
       const body = (await detail.json()) as { item?: ConvMeta & { messages?: ChatMessage[] } };
-      const messages = Array.isArray(body.item?.messages) ? body.item.messages : [];
-      setConvs((prev) => prev.map((conv) => (conv.id === current ? { ...conv, messages: mergeMessages(conv.messages, messages) } : conv)));
+      const incoming = Array.isArray(body.item?.messages) ? body.item.messages : [];
+      setConvs((prev) => replaceMessages(prev, current, incoming));
     };
     void pull();
     const timer = window.setInterval(() => void pull(), 4000);
@@ -162,8 +164,8 @@ export function ChatApp() {
       .then(async (res) => {
         if (stop || !res.ok) return;
         const body = (await res.json()) as { item?: { messages?: ChatMessage[] } };
-        const messages = Array.isArray(body.item?.messages) ? body.item.messages : [];
-        setConvs((prev) => prev.map((conv) => (conv.id === activeId ? { ...conv, messages: mergeMessages(conv.messages, messages) } : conv)));
+        const incoming = Array.isArray(body.item?.messages) ? body.item.messages : [];
+        setConvs((prev) => replaceMessages(prev, activeId, incoming));
       })
       .catch(() => undefined);
     return () => {
@@ -291,14 +293,33 @@ export function ChatApp() {
     waitingRef.current = pending || holdRef.current;
   }, [messages]);
 
-  useEffect(() => {
-    const el = threadRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+  useLayoutEffect(() => {
+    stickRef.current = true;
+    pinThreadToBottom();
+  }, [activeId]);
+
+  useLayoutEffect(() => {
+    if (!stickRef.current) return;
+    pinThreadToBottom();
   }, [messages, messages[messages.length - 1]?.text]);
 
   useEffect(() => {
     setEditingKey("");
   }, [activeId]);
+
+  function onThreadScroll() {
+    const el = threadRef.current;
+    if (!el || pinningRef.current) return;
+    stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  }
+
+  function pinThreadToBottom() {
+    const el = threadRef.current;
+    if (!el) return;
+    pinningRef.current = true;
+    el.scrollTop = el.scrollHeight;
+    pinningRef.current = false;
+  }
 
   function publish(input: {
     conversationId: string;
@@ -390,6 +411,7 @@ export function ChatApp() {
       setError("连接已断开，这句话还没发出");
       return;
     }
+    stickRef.current = true;
     if (fromComposer) {
       setDraft("");
       releaseFiles(files);
@@ -466,6 +488,7 @@ export function ChatApp() {
       setError("连接已断开，确认还没发出");
       return;
     }
+    stickRef.current = true;
     holdRef.current = true;
     setHold(true);
   }
@@ -798,7 +821,7 @@ export function ChatApp() {
           </section>
         ) : (
           <section className="stage">
-            <div className="thread" ref={threadRef}>
+            <div className="thread" ref={threadRef} onScroll={onThreadScroll}>
               <div className="thread-inner">
                 {messages.map((message) => (
                   <MessageView
@@ -1712,6 +1735,52 @@ function mergeList(prev: Conv[], items: ConvMeta[], renaming: string): Conv[] {
   });
   const fresh = prev.filter((conv) => !ids.has(conv.id) && Date.now() - conv.updatedAt < 15000);
   return sortConvs([...fresh, ...merged]);
+}
+
+function replaceMessages(prev: Conv[], conversationId: string, incoming: ChatMessage[]): Conv[] {
+  let changed = false;
+  const next = prev.map((conv) => {
+    if (conv.id !== conversationId) return conv;
+    const messages = mergeMessages(conv.messages, incoming);
+    if (messagesEqual(conv.messages, messages)) return conv;
+    changed = true;
+    return { ...conv, messages };
+  });
+  return changed ? next : prev;
+}
+
+function messagesEqual(local: ChatMessage[], next: ChatMessage[]): boolean {
+  if (local.length !== next.length) return false;
+  for (let index = 0; index < local.length; index += 1) {
+    const left = local[index];
+    const right = next[index];
+    if (left === right) continue;
+    if (
+      left.id !== right.id ||
+      left.clientMsgId !== right.clientMsgId ||
+      left.role !== right.role ||
+      left.kind !== right.kind ||
+      left.text !== right.text ||
+      left.time !== right.time ||
+      left.streaming !== right.streaming ||
+      left.pending !== right.pending ||
+      left.projectId !== right.projectId ||
+      left.url !== right.url ||
+      left.fileName !== right.fileName ||
+      left.decision !== right.decision ||
+      left.percent !== right.percent ||
+      left.stage !== right.stage ||
+      attachmentKey(left) !== attachmentKey(right)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function attachmentKey(message: ChatMessage): string {
+  const items = Array.isArray(message.attachments) ? message.attachments : [];
+  return items.map((item) => `${item.url}|${item.name}|${item.size}`).join("\n");
 }
 
 function mergeMessages(local: ChatMessage[], remote: ChatMessage[]): ChatMessage[] {
