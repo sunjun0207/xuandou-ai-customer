@@ -512,7 +512,7 @@ export function ChatApp() {
           </div>
         ) : null}
         <a className="console-link" href="/app/projects">
-          项目后台
+          管理后台
         </a>
         <div className="side-user">
           <span className="avatar">{(user.displayName || user.username).slice(0, 1)}</span>
@@ -785,7 +785,7 @@ function Composer({
               })
             ) : (
               <p className="project-empty">
-                还没有可选项目。<a href="/app/projects">去项目后台添加</a>
+                还没有可选项目。<a href="/app/projects">去管理后台添加</a>
               </p>
             )}
           </div>

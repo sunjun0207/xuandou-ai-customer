@@ -376,8 +376,20 @@ button { cursor: pointer; }
   text-decoration: none;
   text-align: left;
 }
+.console-back {
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 10px;
+  background: #e08a3c;
+  color: #fff;
+  font-weight: 650;
+  box-shadow: 0 1px 2px rgba(154, 52, 18, 0.2);
+}
+.console-back:hover { background: #c56d22; color: #fff; }
+.console-back:active { background: #9a3412; }
+.console-back:focus-visible { outline: 2px solid #f6d7b8; outline-offset: 2px; }
 .console-side nav { display: grid; gap: 2px; align-content: start; }
-.console-side nav a.on, .console-back:hover, .console-side nav a:hover, .console-logout:hover { background: #fff1e4; color: #9a3412; }
+.console-side nav a.on, .console-side nav a:hover, .console-logout:hover { background: #fff1e4; color: #9a3412; }
 .console-logout { margin-top: auto; }
 .console-main { min-width: 0; overflow: auto; padding: 28px 28px 48px; }
 .console-sheet { width: 100%; }
@@ -416,16 +428,52 @@ button { cursor: pointer; }
 .menu-picks > div { display: flex; flex-wrap: wrap; gap: 8px; }
 .menu-picks label { flex-direction: row; align-items: center; gap: 6px; width: auto; padding: 6px 10px; border: 1px solid #f0e4d4; border-radius: 999px; background: #fffaf5; }
 .menu-picks small { color: #9a6b45; }
-.console-search { display: flex; gap: 10px; margin: 20px 0 16px; }
-.console-search input { flex: 1; height: 42px; border: 1px solid #eadfce; border-radius: 10px; padding: 0 12px; }
-.pager { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 14px; color: #7c5a3a; }
+.console-toolbar { display: flex; gap: 12px; align-items: center; margin: 20px 0 16px; }
+.console-search { display: flex; flex: 1; gap: 10px; margin: 0; min-width: 0; }
+.console-search input { flex: 1; min-width: 0; height: 42px; border: 1px solid #eadfce; border-radius: 10px; padding: 0 12px; }
+.pager { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 12px; margin-top: 14px; color: #7c5a3a; }
+.pager label { display: flex; align-items: center; gap: 8px; }
+.pager select { height: 36px; border-radius: 10px; border: 1px solid #f0d3b4; padding: 0 10px; background: #fff; color: #9a4e12; }
+.modal-scrim {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(24, 16, 8, 0.45);
+}
+.modal {
+  width: min(680px, 100%);
+  max-height: min(86dvh, 780px);
+  overflow: auto;
+  background: #fff;
+  border-radius: 18px;
+  padding: 22px 22px 18px;
+  box-shadow: 0 18px 50px rgba(24, 16, 8, 0.22);
+}
+.modal h2 { margin: 0 0 8px; font-size: 20px; }
+.modal .hint { margin: 0 0 16px; color: #667085; line-height: 1.6; }
+.modal .console-form {
+  grid-template-columns: 1fr 1fr;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+.modal .console-form label.wide { grid-column: 1 / -1; }
+.modal .console-form .toast,
+.modal .console-form .form-actions { grid-column: 1 / -1; }
+.modal .form-actions { justify-content: flex-end; }
+.modal .menu-picks > div { max-height: 180px; overflow: auto; }
+.modal .row-action { height: 40px; padding: 0 16px; }
 .row-actions { display: flex; justify-content: flex-end; gap: 8px; white-space: nowrap; }
 .question-text { max-width: 520px; white-space: pre-wrap; }
 .nowrap { white-space: nowrap; }
 .record-list, .console-table { background: #fff; border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
 .record-head, .record-row {
   display: grid;
-  grid-template-columns: minmax(120px, 1.1fr) minmax(80px, 0.7fr) minmax(140px, 1.3fr) 76px 64px;
+  grid-template-columns: minmax(120px, 1.1fr) minmax(80px, 0.7fr) minmax(140px, 1.3fr) 76px 148px;
   gap: 12px;
   align-items: center;
   padding: 0 18px;
@@ -457,7 +505,8 @@ button { cursor: pointer; }
   .console-side nav { grid-auto-flow: column; grid-auto-columns: max-content; overflow: auto; }
   .console-logout { margin-top: 8px; }
   .console-main { overflow: visible; padding: 20px 16px 40px; }
-  .console-form, .record-head, .record-row { grid-template-columns: 1fr; }
+  .console-toolbar { flex-direction: column; align-items: stretch; }
+  .console-form, .modal .console-form, .record-head, .record-row { grid-template-columns: 1fr; }
   .record-head { display: none; }
 }
 
