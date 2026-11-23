@@ -352,7 +352,7 @@ export function ChatApp() {
     return true;
   }
 
-  function send(text = draft.trim(), confirm = confirming, reuse?: ChatAttachment[]) {
+  function send(text = draft.trim(), confirm = confirming, reuse?: ChatAttachment[], linkedIds?: string[]) {
     const fromComposer = reuse === undefined;
     if ((holdRef.current || awaitingReply(messages)) && !confirm) return;
     if (fromComposer && files.some((item) => item.status === "uploading")) {
@@ -367,7 +367,7 @@ export function ChatApp() {
     if (!text && !attachments.length) return;
     const conversationId = activeId || newId();
     const clientMsgId = newId();
-    const projectIds = pickedIds.filter((id) => {
+    const projectIds = (linkedIds ?? pickedIds).filter((id) => {
       const found = projects.find((item) => item.id === id);
       return !found || found.status !== 0;
     });
@@ -426,8 +426,8 @@ export function ChatApp() {
     copiedTimer.current = window.setTimeout(() => setCopiedKey((current) => (current === key ? "" : current)), 1600);
   }
 
-  function resendEdited(text: string, attachments: ChatAttachment[]) {
-    send(text.trim(), null, attachments);
+  function resendEdited(text: string, attachments: ChatAttachment[], projectIds: string[]) {
+    send(text.trim(), null, attachments, projectIds);
   }
 
   function openGallery(url: string) {
@@ -817,7 +817,8 @@ export function ChatApp() {
                     onOpenImage={openGallery}
                     maxBytes={maxBytes}
                     maxLabel={maxLabel}
-                    onSubmitEdit={(text, attachments) => resendEdited(text, attachments)}
+                    projects={projects}
+                    onSubmitEdit={(text, attachments, projectIds) => resendEdited(text, attachments, projectIds)}
                     onRegenerate={() => regenerate(message)}
                   />
                 ))}
@@ -875,6 +876,7 @@ function MessageView({
   onOpenImage,
   maxBytes,
   maxLabel,
+  projects,
   onSubmitEdit,
   onRegenerate,
 }: {
@@ -892,7 +894,8 @@ function MessageView({
   onOpenImage: (url: string) => void;
   maxBytes: number;
   maxLabel: string;
-  onSubmitEdit: (text: string, attachments: ChatAttachment[]) => void;
+  projects: Project[];
+  onSubmitEdit: (text: string, attachments: ChatAttachment[], projectIds: string[]) => void;
   onRegenerate: () => void;
 }) {
   if (message.role === "user") {
@@ -908,6 +911,8 @@ function MessageView({
               busy={busy}
               maxBytes={maxBytes}
               maxLabel={maxLabel}
+              projects={projects}
+              initialProjectIds={message.projectId ? [message.projectId] : []}
               onCancel={onCancelEdit}
               onSubmit={onSubmitEdit}
             />
@@ -999,6 +1004,8 @@ function MessageEditor({
   busy,
   maxBytes,
   maxLabel,
+  projects,
+  initialProjectIds,
   onCancel,
   onSubmit,
 }: {
@@ -1007,10 +1014,14 @@ function MessageEditor({
   busy: boolean;
   maxBytes: number;
   maxLabel: string;
+  projects: Project[];
+  initialProjectIds: string[];
   onCancel: () => void;
-  onSubmit: (text: string, attachments: ChatAttachment[]) => void;
+  onSubmit: (text: string, attachments: ChatAttachment[], projectIds: string[]) => void;
 }) {
   const [value, setValue] = useState(initial);
+  const [pickedIds, setPickedIds] = useState(initialProjectIds);
+  const [showLink, setShowLink] = useState(false);
   const [items, setItems] = useState<DraftFile[]>(() =>
     attachments.map((item) => ({
       id: item.url || newId(),
@@ -1029,6 +1040,7 @@ function MessageEditor({
   const itemsRef = useRef(items);
   itemsRef.current = items;
   const ready = items.filter((item) => item.status === "ready" && item.url);
+  const picked = projects.filter((item) => pickedIds.includes(item.id));
   const canSend = !busy && !items.some((item) => item.status === "uploading") && (Boolean(value.trim()) || ready.length > 0);
   useEffect(() => {
     const area = ref.current;
@@ -1050,7 +1062,15 @@ function MessageEditor({
     onSubmit(
       value,
       ready.map((item) => ({ name: item.name, mime: item.mime, url: item.url, size: item.size })),
+      pickedIds.filter((id) => {
+        const found = projects.find((item) => item.id === id);
+        return !found || found.status !== 0;
+      }),
     );
+  }
+
+  function toggleProject(id: string) {
+    setPickedIds((prev) => (prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]));
   }
 
   function addPicked(list: File[]) {
@@ -1138,6 +1158,16 @@ function MessageEditor({
           )}
         </div>
       ) : null}
+      {picked.length ? (
+        <div className="picked">
+          {picked.map((item) => (
+            <button key={item.id} type="button" className="picked-chip" onClick={() => toggleProject(item.id)}>
+              {item.name}
+              <span aria-hidden="true">×</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
       <textarea
         ref={ref}
         value={value}
@@ -1166,26 +1196,35 @@ function MessageEditor({
         }}
       />
       <div className="msg-edit-bar">
-        <button type="button" className="icon-btn" aria-label={`添加附件，单个不超过 ${maxLabel}`} title={`单个文件不超过 ${maxLabel}`} onClick={() => fileRef.current?.click()}>
-          <Clip />
-        </button>
-        <input
-          ref={fileRef}
-          type="file"
-          multiple
-          hidden
-          onChange={(event) => {
-            addPicked(filesFromList(event.target.files));
-            event.target.value = "";
-          }}
-        />
-        <button type="button" className="msg-edit-cancel" onClick={onCancel}>
-          取消
-        </button>
-        <button type="submit" className="msg-edit-send" disabled={!canSend}>
-          发送
-        </button>
+        <div className="composer-tools">
+          <button type="button" className="icon-btn" aria-label={`添加附件，单个不超过 ${maxLabel}`} title={`单个文件不超过 ${maxLabel}`} onClick={() => fileRef.current?.click()}>
+            <Clip />
+          </button>
+          <span className="size-limit">{maxLabel}</span>
+          <input
+            ref={fileRef}
+            type="file"
+            multiple
+            hidden
+            onChange={(event) => {
+              addPicked(filesFromList(event.target.files));
+              event.target.value = "";
+            }}
+          />
+          <button type="button" className={showLink || picked.length ? "link-project on" : "link-project"} onClick={() => setShowLink((open) => !open)}>
+            关联项目{picked.length ? ` · ${picked.length}` : ""}
+          </button>
+        </div>
+        <div className="msg-edit-actions">
+          <button type="button" className="msg-edit-cancel" onClick={onCancel}>
+            取消
+          </button>
+          <button type="submit" className="msg-edit-send" disabled={!canSend}>
+            发送
+          </button>
+        </div>
       </div>
+      {showLink ? <ProjectMenu projects={projects} pickedIds={pickedIds} onToggle={toggleProject} /> : null}
     </form>
   );
 }
@@ -1288,6 +1327,31 @@ function ImageViewer({
           ›
         </button>
       ) : null}
+    </div>
+  );
+}
+
+function ProjectMenu({ projects, pickedIds, onToggle }: { projects: Project[]; pickedIds: string[]; onToggle: (id: string) => void }) {
+  return (
+    <div className="project-menu" role="group" aria-label="选择项目">
+      {projects.length ? (
+        projects.map((item) => {
+          const on = pickedIds.includes(item.id);
+          return (
+            <label key={item.id} className={on ? "project-option on" : "project-option"}>
+              <input type="checkbox" checked={on} onChange={() => onToggle(item.id)} />
+              <span>
+                <b>{item.name}</b>
+                <small>{item.code}</small>
+              </span>
+            </label>
+          );
+        })
+      ) : (
+        <p className="project-empty">
+          还没有可选项目。<a href="/app/projects">去管理后台添加</a>
+        </p>
+      )}
     </div>
   );
 }
@@ -1423,7 +1487,7 @@ function Composer({
                 event.target.value = "";
               }}
             />
-            <button type="button" className={showLink || picked.length ? "text-btn on" : "text-btn"} onClick={() => setShowLink(!showLink)}>
+            <button type="button" className={showLink || picked.length ? "link-project on" : "link-project"} onClick={() => setShowLink(!showLink)}>
               关联项目{picked.length ? ` · ${picked.length}` : ""}
             </button>
           </div>
@@ -1431,28 +1495,7 @@ function Composer({
             <Arrow />
           </button>
         </div>
-        {showLink ? (
-          <div className="project-menu" role="group" aria-label="选择项目">
-            {projects.length ? (
-              projects.map((item) => {
-                const on = pickedIds.includes(item.id);
-                return (
-                  <label key={item.id} className={on ? "project-option on" : "project-option"}>
-                    <input type="checkbox" checked={on} onChange={() => onToggle(item.id)} />
-                    <span>
-                      <b>{item.name}</b>
-                      <small>{item.code}</small>
-                    </span>
-                  </label>
-                );
-              })
-            ) : (
-              <p className="project-empty">
-                还没有可选项目。<a href="/app/projects">去管理后台添加</a>
-              </p>
-            )}
-          </div>
-        ) : null}
+        {showLink ? <ProjectMenu projects={projects} pickedIds={pickedIds} onToggle={onToggle} /> : null}
       </div>
     </div>
   );
