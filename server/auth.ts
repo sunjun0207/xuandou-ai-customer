@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "crypto";
 import type { IncomingMessage, ServerResponse } from "http";
-import { clearSession, publicUser, readSession, writeSession, type Session } from "./session";
+import { clearSession, expiresIn, openSession, publicUser, readRefreshSession, readSession, type Session } from "./session";
 
 export async function handleLogin(req: IncomingMessage, res: ServerResponse) {
   const body = await readJson(req);
@@ -11,27 +11,37 @@ export async function handleLogin(req: IncomingMessage, res: ServerResponse) {
   if (remote === "down") {
     const dev = devSession(username, password);
     if (!dev) return sendJson(res, 503, { error: "登录服务暂时不可用" });
-    writeSession(req, res, dev);
-    return sendJson(res, 200, { user: publicUser(dev) });
+    return sendJson(res, 200, { ...openSession(req, res, dev), user: publicUser(dev) });
   }
   if (!remote.session) return sendJson(res, remote.status, { error: remote.error || "登录失败" });
-  writeSession(req, res, remote.session);
-  sendJson(res, 200, { user: publicUser(remote.session) });
+  const { exp: _exp, ...profile } = remote.session;
+  sendJson(res, 200, { ...openSession(req, res, profile), user: publicUser(remote.session) });
 }
 
 export async function handleLogout(req: IncomingMessage, res: ServerResponse) {
-  const session = readSession(req);
+  const session = readSession(req) || readRefreshSession(req);
   clearSession(req, res);
   if (session?.frpToken) await logoutFrp(session.frpToken);
   sendJson(res, 200, { ok: true });
+}
+
+export async function handleRefresh(req: IncomingMessage, res: ServerResponse) {
+  const session = readRefreshSession(req);
+  if (!session) {
+    clearSession(req, res);
+    return sendJson(res, 401, { error: "登录已过期" });
+  }
+  const { exp: _exp, ...profile } = session;
+  sendJson(res, 200, { ...openSession(req, res, profile), user: publicUser(session) });
 }
 
 export async function handleMe(req: IncomingMessage, res: ServerResponse) {
   const session = readSession(req);
   if (!session) return sendJson(res, 401, { error: "未登录" });
   const wantMenus = new URL(req.url || "/", "http://127.0.0.1").searchParams.get("menus") === "1";
-  if (!wantMenus) return sendJson(res, 200, { user: publicUser(session) });
-  sendJson(res, 200, { user: publicUser(session), menus: await menusFor(session.frpToken) });
+  const body = { user: publicUser(session), expiresIn: expiresIn(session) };
+  if (!wantMenus) return sendJson(res, 200, body);
+  sendJson(res, 200, { ...body, menus: await menusFor(session.frpToken) });
 }
 
 async function menusFor(token: string): Promise<unknown[]> {
@@ -72,7 +82,7 @@ async function loginFrp(username: string, password: string): Promise<"down" | { 
       displayName: text(user.displayName) || name,
       roleCode: text(user.roleCode),
       frpToken: text(body.token),
-      exp: Math.floor(Date.now() / 1000) + 7 * 24 * 3600,
+      exp: 0,
     };
     return { status: 200, session };
   } catch (error) {
@@ -107,7 +117,7 @@ function devSession(username: string, password: string): Session | undefined {
     displayName: "管理员",
     roleCode: "admin",
     frpToken: "",
-    exp: Math.floor(Date.now() / 1000) + 7 * 24 * 3600,
+    exp: 0,
   };
 }
 

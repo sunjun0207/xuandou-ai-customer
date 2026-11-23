@@ -3,6 +3,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { Mark } from "../../mark";
+import { endSession, ensureSession, watchSession } from "../../session";
 
 type Menu = { id: string; name: string; menuCode?: string; path: string; perm: string; parentId?: string; status?: number; sortNo?: number };
 type Role = { id: string; code: string; name: string; description?: string; status?: number; menuIds?: string[] };
@@ -45,6 +46,10 @@ export default function ConsolePage() {
   useEffect(() => {
     if (view === "tasks") router.replace("/app/projects");
   }, [view, router]);
+
+  useEffect(() => {
+    return watchSession(() => router.replace(`/login?next=${encodeURIComponent(pathname)}`));
+  }, [router, pathname]);
 
   useEffect(() => {
     api("/api/auth/me?menus=1")
@@ -287,7 +292,7 @@ export default function ConsolePage() {
   }
 
   async function logout() {
-    await fetch("/api/auth/logout", { method: "POST" });
+    await endSession();
     router.replace("/login");
   }
 
@@ -822,8 +827,13 @@ async function loadQuestions(keyword: string, page: number, pageSize: number) {
   return api(`/api/problems?q=${encodeURIComponent(keyword)}&page=${page}&pageSize=${pageSize}`);
 }
 
-async function api(path: string) {
+async function api(path: string, allowRefresh = true) {
   const response = await fetch(path);
+  if (response.status === 401 && allowRefresh) {
+    const ok = await ensureSession();
+    if (!ok) throw new Error("unauthorized");
+    return api(path, false);
+  }
   if (response.status === 401) throw new Error("unauthorized");
   if (!response.ok) throw new Error(await response.text());
   return response.json();

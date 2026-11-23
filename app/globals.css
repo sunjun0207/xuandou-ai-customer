@@ -211,6 +211,49 @@ button { cursor: pointer; }
 .msg-col { display: flex; flex-direction: column; align-items: flex-end; max-width: min(640px, 88%); min-width: 0; }
 .msg-user .bubble { max-width: 100%; }
 .msg-time { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; line-height: 1.4; font-variant-numeric: tabular-nums; }
+.msg-actions { display: flex; align-items: center; gap: 2px; margin-top: 4px; }
+.msg-actions.end { align-self: flex-end; }
+.msg-tool {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #8b8b96;
+  display: grid;
+  place-items: center;
+  padding: 0;
+}
+.msg-tool:hover { background: #f2f2f4; color: #333; }
+.msg-tool:disabled { opacity: 0.35; cursor: default; }
+.msg-tool:disabled:hover { background: transparent; color: #8b8b96; }
+.msg-edit {
+  width: min(560px, 100%);
+  background: #fff;
+  border: 1px solid #e4e4e8;
+  border-radius: 16px;
+  padding: 10px 12px 8px;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+.msg-edit textarea {
+  width: 100%;
+  border: 0;
+  resize: none;
+  outline: none;
+  background: transparent;
+  line-height: 1.6;
+  min-height: 72px;
+  max-height: 220px;
+  padding: 0;
+}
+.msg-edit-bar { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.msg-edit-cancel, .msg-edit-send { border: 0; border-radius: 999px; height: 32px; padding: 0 14px; }
+.msg-edit-cancel { background: #f4f4f5; }
+.msg-edit-cancel:hover { background: #ececef; }
+.msg-edit-send { background: var(--blue); color: #fff; }
+.msg-edit-send:hover { background: var(--blue-press); }
+.msg-edit-send:disabled { opacity: 0.4; cursor: default; }
+.msg-edit-send:disabled:hover { background: var(--blue); }
 
 .bubble {
   max-width: min(640px, 88%);

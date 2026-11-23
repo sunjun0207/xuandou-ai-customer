@@ -8,6 +8,7 @@ import { fetchUploadCredential, postQiniu } from "./upload";
 import { blankMessage, mergeMessage, newId, type ChatAttachment, type ChatMessage, type ServerFrame, type UpstreamState } from "../shared/protocol";
 import { nextSnowflake } from "../shared/snowflake";
 import { DEFAULT_MAX_BYTES, displayFileName, extensionOf, formatBytes, formatMaxLabel, isImageFile, MAX_ATTACHMENTS } from "../shared/upload";
+import { endSession, ensureSession, sessionLeaving, watchSession } from "./session";
 
 type User = { userId: string; username: string; displayName: string; roleCode: string };
 type ConvMeta = { id: string; title: string; updatedAt: number; renamed?: boolean; pinned?: boolean; pinnedAt?: number };
@@ -54,6 +55,8 @@ export function ChatApp() {
   const [checked, setChecked] = useState<string[]>([]);
   const [hint, setHint] = useState("");
   const [hold, setHold] = useState(false);
+  const [editingKey, setEditingKey] = useState("");
+  const [copiedKey, setCopiedKey] = useState("");
   const wsRef = useRef<WebSocket | null>(null);
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
@@ -68,12 +71,22 @@ export function ChatApp() {
   maxLabelRef.current = maxLabel;
   const renameIdRef = useRef("");
   const holdRef = useRef(false);
+  const copiedTimer = useRef(0);
   renameIdRef.current = renameId;
 
   useEffect(() => {
+    return watchSession(() => router.replace("/login"));
+  }, [router]);
+
+  useEffect(() => {
     let stop = false;
-    fetch("/api/auth/me")
-      .then(async (res) => {
+    ensureSession()
+      .then(async (ok) => {
+        if (!ok) {
+          router.replace("/login");
+          return;
+        }
+        const res = await fetch("/api/auth/me");
         if (res.status === 401) {
           router.replace("/login");
           return;
@@ -108,7 +121,12 @@ export function ChatApp() {
     const pull = async () => {
       if (stop || document.visibilityState === "hidden") return;
       const listed = await fetch("/api/conversations");
-      if (stop || listed.status === 401) return;
+      if (stop) return;
+      if (listed.status === 401) {
+        const ok = await ensureSession();
+        if (!stop && !ok) router.replace("/login");
+        return;
+      }
       if (!listed.ok) return;
       const data = (await listed.json()) as { items?: ConvMeta[] };
       const items = Array.isArray(data.items) ? data.items : [];
@@ -132,7 +150,7 @@ export function ChatApp() {
       window.removeEventListener("focus", onFocus);
       document.removeEventListener("visibilitychange", onFocus);
     };
-  }, [user, hydrated]);
+  }, [user, hydrated, router]);
 
   useEffect(() => {
     if (!user || !hydrated || !activeId) return;
@@ -195,7 +213,15 @@ export function ChatApp() {
       socket.onclose = () => {
         if (wsRef.current !== socket) return;
         setUpstream("down");
-        if (!stopped) timer = window.setTimeout(connect, 1500);
+        if (stopped || sessionLeaving()) return;
+        void ensureSession().then((ok) => {
+          if (stopped) return;
+          if (!ok) {
+            router.replace("/login");
+            return;
+          }
+          timer = window.setTimeout(connect, 400);
+        });
       };
     };
     const ping = window.setInterval(() => {
@@ -215,7 +241,7 @@ export function ChatApp() {
       window.clearInterval(ping);
       wsRef.current?.close();
     };
-  }, [user, hydrated]);
+  }, [user, hydrated, router]);
 
   useEffect(() => {
     if (!menuId) return;
@@ -254,22 +280,27 @@ export function ChatApp() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, messages[messages.length - 1]?.text]);
 
-  function send(text = draft.trim(), confirm = confirming) {
+  useEffect(() => {
+    setEditingKey("");
+  }, [activeId]);
+
+  function send(text = draft.trim(), confirm = confirming, reuse?: ChatAttachment[]) {
+    const fromComposer = reuse === undefined;
     if ((holdRef.current || awaitingReply(messages)) && !confirm) return;
     const socket = wsRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       setError("连接已断开，这句话还没发出");
       return;
     }
-    if (files.some((item) => item.status === "uploading")) {
+    if (fromComposer && files.some((item) => item.status === "uploading")) {
       setError("附件还在上传");
       return;
     }
-    if (files.some((item) => item.status === "error")) {
+    if (fromComposer && files.some((item) => item.status === "error")) {
       setError("有附件上传失败，请移除后再发");
       return;
     }
-    const attachments = files.filter((item) => item.status === "ready" && item.url).map((item) => ({ name: item.name, mime: item.mime, url: item.url, size: item.size }));
+    const attachments = reuse ?? files.filter((item) => item.status === "ready" && item.url).map((item) => ({ name: item.name, mime: item.mime, url: item.url, size: item.size }));
     if (!text && !attachments.length) return;
     const conversationId = activeId || newId();
     const clientMsgId = newId();
@@ -297,14 +328,50 @@ export function ChatApp() {
     } else {
       socket.send(JSON.stringify({ type: "send", conversationId, clientMsgId, text, ...linked }));
     }
-    setDraft("");
-    releaseFiles(files);
-    setFiles([]);
-    setConfirming(null);
+    if (fromComposer) {
+      setDraft("");
+      releaseFiles(files);
+      setFiles([]);
+      setConfirming(null);
+      if (boxRef.current) boxRef.current.style.height = "";
+    }
+    setEditingKey("");
     setError("");
     holdRef.current = true;
     setHold(true);
-    if (boxRef.current) boxRef.current.style.height = "";
+  }
+
+  function priorUser(message: ChatMessage): ChatMessage | undefined {
+    const index = messages.findIndex((item) => messageKey(item) === messageKey(message));
+    for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+      const item = messages[cursor];
+      if (item.role === "user" && (captionOf(item).trim() || listedAttachments(item).length)) return item;
+    }
+    return undefined;
+  }
+
+  async function copyMessage(message: ChatMessage) {
+    const text = messagePlain(message);
+    if (!text) return;
+    const copied = await writeClipboard(text);
+    if (!copied) {
+      setError("复制失败，请允许剪贴板权限后再试");
+      return;
+    }
+    const key = messageKey(message);
+    setCopiedKey(key);
+    window.clearTimeout(copiedTimer.current);
+    copiedTimer.current = window.setTimeout(() => setCopiedKey((current) => (current === key ? "" : current)), 1600);
+  }
+
+  function resendEdited(text: string, source: ChatMessage) {
+    send(text.trim(), null, listedAttachments(source));
+  }
+
+  function regenerate(message: ChatMessage) {
+    const source = priorUser(message);
+    if (!source) return;
+    send(captionOf(source).trim(), null, listedAttachments(source));
   }
 
   function toggleProject(id: string) {
@@ -494,8 +561,8 @@ export function ChatApp() {
   }
 
   async function logout() {
+    await endSession();
     wsRef.current?.close();
-    await fetch("/api/auth/logout", { method: "POST" });
     router.replace("/login");
   }
 
@@ -665,7 +732,22 @@ export function ChatApp() {
             <div className="thread" ref={threadRef}>
               <div className="thread-inner">
                 {messages.map((message) => (
-                  <MessageView key={message.clientMsgId || message.id} message={message} messages={messages} onAccept={accept} onRevise={setConfirming} />
+                  <MessageView
+                    key={message.clientMsgId || message.id}
+                    message={message}
+                    messages={messages}
+                    busy={waiting}
+                    editing={editingKey === messageKey(message)}
+                    copied={copiedKey === messageKey(message)}
+                    canRegenerate={Boolean(priorUser(message))}
+                    onAccept={accept}
+                    onRevise={setConfirming}
+                    onCopy={() => void copyMessage(message)}
+                    onEdit={() => setEditingKey(messageKey(message))}
+                    onCancelEdit={() => setEditingKey("")}
+                    onSubmitEdit={(text) => resendEdited(text, message)}
+                    onRegenerate={() => regenerate(message)}
+                  />
                 ))}
               </div>
             </div>
@@ -701,29 +783,63 @@ export function ChatApp() {
 function MessageView({
   message,
   messages,
+  busy,
+  editing,
+  copied,
+  canRegenerate,
   onAccept,
   onRevise,
+  onCopy,
+  onEdit,
+  onCancelEdit,
+  onSubmitEdit,
+  onRegenerate,
 }: {
   message: ChatMessage;
   messages: ChatMessage[];
+  busy: boolean;
+  editing: boolean;
+  copied: boolean;
+  canRegenerate: boolean;
   onAccept: (message: ChatMessage) => void;
   onRevise: (value: Confirming) => void;
+  onCopy: () => void;
+  onEdit: () => void;
+  onCancelEdit: () => void;
+  onSubmitEdit: (text: string) => void;
+  onRegenerate: () => void;
 }) {
   if (message.role === "user") {
+    const canEdit = Boolean(captionOf(message).trim() || listedAttachments(message).length);
     return (
       <article className="msg-user">
         <div className="msg-col">
-          <div className="bubble">
-            {captionOf(message) ? <RichText text={captionOf(message)} /> : null}
-            <AttachmentList message={message} />
-            {message.pending ? <div className="pending">待送达，通道恢复后会自动发出</div> : null}
-          </div>
+          {editing ? (
+            <MessageEditor initial={captionOf(message)} busy={busy} allowEmpty={listedAttachments(message).length > 0} onCancel={onCancelEdit} onSubmit={onSubmitEdit} />
+          ) : (
+            <div className="bubble">
+              {captionOf(message) ? <RichText text={captionOf(message)} /> : null}
+              <AttachmentList message={message} />
+              {message.pending ? <div className="pending">待送达，通道恢复后会自动发出</div> : null}
+            </div>
+          )}
           <MessageTime time={message.time} />
+          {editing ? null : (
+            <div className="msg-actions end">
+              {messagePlain(message) ? <CopyButton copied={copied} onCopy={onCopy} /> : null}
+              {canEdit ? (
+                <button type="button" className="msg-tool" aria-label="修改后重新发送" title="修改" disabled={busy} onClick={onEdit}>
+                  <PencilIcon />
+                </button>
+              ) : null}
+            </div>
+          )}
         </div>
       </article>
     );
   }
   const decided = message.requestId ? messages.some((item) => item.requestId === message.requestId && item.decision) : false;
+  const showRegenerate = message.kind !== "progress" && !message.streaming;
   return (
     <article className="msg-ai">
       <Mark size={28} />
@@ -759,8 +875,90 @@ function MessageView({
           </div>
         ) : null}
         <MessageTime time={message.time} />
+        {messagePlain(message) || showRegenerate ? (
+          <div className="msg-actions">
+            {messagePlain(message) ? <CopyButton copied={copied} onCopy={onCopy} /> : null}
+            {showRegenerate ? (
+              <button type="button" className="msg-tool" aria-label="重新生成" title="重新生成" disabled={busy || !canRegenerate} onClick={onRegenerate}>
+                <RefreshIcon />
+              </button>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </article>
+  );
+}
+
+function CopyButton({ copied, onCopy }: { copied: boolean; onCopy: () => void }) {
+  return (
+    <button type="button" className="msg-tool" aria-label={copied ? "已复制" : "复制"} title={copied ? "已复制" : "复制"} onClick={onCopy}>
+      {copied ? <CheckIcon /> : <CopyIcon />}
+    </button>
+  );
+}
+
+function MessageEditor({
+  initial,
+  busy,
+  allowEmpty,
+  onCancel,
+  onSubmit,
+}: {
+  initial: string;
+  busy: boolean;
+  allowEmpty: boolean;
+  onCancel: () => void;
+  onSubmit: (text: string) => void;
+}) {
+  const [value, setValue] = useState(initial);
+  const ref = useRef<HTMLTextAreaElement | null>(null);
+  useEffect(() => {
+    const area = ref.current;
+    if (!area) return;
+    area.focus();
+    area.setSelectionRange(area.value.length, area.value.length);
+    area.style.height = "0px";
+    area.style.height = `${Math.min(220, area.scrollHeight)}px`;
+  }, []);
+  return (
+    <form
+      className="msg-edit"
+      onSubmit={(event) => {
+        event.preventDefault();
+        if (busy || (!value.trim() && !allowEmpty)) return;
+        onSubmit(value);
+      }}
+    >
+      <textarea
+        ref={ref}
+        value={value}
+        aria-label="修改消息"
+        onChange={(event) => {
+          setValue(event.target.value);
+          event.target.style.height = "0px";
+          event.target.style.height = `${Math.min(220, event.target.scrollHeight)}px`;
+        }}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            onCancel();
+          }
+          if (event.key === "Enter" && !event.shiftKey) {
+            event.preventDefault();
+            if (!busy && (value.trim() || allowEmpty)) onSubmit(value);
+          }
+        }}
+      />
+      <div className="msg-edit-bar">
+        <button type="button" className="msg-edit-cancel" onClick={onCancel}>
+          取消
+        </button>
+        <button type="submit" className="msg-edit-send" disabled={busy || (!value.trim() && !allowEmpty)}>
+          发送
+        </button>
+      </div>
+    </form>
   );
 }
 
@@ -998,6 +1196,38 @@ function insertText(box: HTMLTextAreaElement, extra: string, setDraft: (value: s
   });
 }
 
+function messageKey(message: ChatMessage): string {
+  return message.clientMsgId || message.id;
+}
+
+function messagePlain(message: ChatMessage): string {
+  const text = (message.role === "user" ? captionOf(message) : message.text).trim();
+  const lines = text ? [text] : [];
+  if (message.role !== "user" && message.url && !text.includes(message.url)) lines.push(message.url);
+  if (message.role === "user") {
+    for (const item of listedAttachments(message)) {
+      const line = item.url || item.name;
+      if (line && !lines.includes(line)) lines.push(line);
+    }
+  }
+  return lines.join("\n");
+}
+
+async function writeClipboard(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const area = document.createElement("textarea");
+    area.value = text;
+    document.body.appendChild(area);
+    area.select();
+    const copied = document.execCommand("copy");
+    area.remove();
+    return copied;
+  }
+}
+
 function captionOf(message: ChatMessage): string {
   const text = message.text.trim();
   const items = listedAttachments(message);
@@ -1222,6 +1452,41 @@ function Clip() {
   return (
     <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">
       <path d="M7 9.5l4.2-4.2a2.4 2.4 0 0 1 3.4 3.4L8.2 15a3.6 3.6 0 0 1-5.1-5.1L8.6 4.4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function CopyIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+      <rect x="5.4" y="5.4" width="8" height="8" rx="1.5" fill="none" stroke="currentColor" strokeWidth="1.4" />
+      <path d="M10.4 5.2V3.7A1.5 1.5 0 0 0 8.9 2.2H3.7A1.5 1.5 0 0 0 2.2 3.7V8.9A1.5 1.5 0 0 0 3.7 10.4H5.2" fill="none" stroke="currentColor" strokeWidth="1.4" />
+    </svg>
+  );
+}
+
+function CheckIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M3.2 8.3l3 3 6.6-6.6" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function PencilIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M9.4 3.1l3.5 3.5-7.2 7.2-3.6.6.6-3.6 6.7-7.7z" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+      <path d="M8.2 4.3l3.5 3.5" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  );
+}
+
+function RefreshIcon() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M13.2 8a5.2 5.2 0 1 1-1.52-3.68" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+      <path d="M13.5 2.5v3.3H10.2" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }

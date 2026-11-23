@@ -3,6 +3,7 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 import { Mark } from "../mark";
+import { ensureSession, resumeSessionWatch } from "../session";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -12,8 +13,9 @@ export default function LoginPage() {
   const [pending, setPending] = useState(false);
 
   useEffect(() => {
-    fetch("/api/auth/me").then((res) => {
-      if (res.ok) router.replace(destination());
+    resumeSessionWatch();
+    void ensureSession().then((ok) => {
+      if (ok) router.replace(destination());
     });
   }, [router]);
 

@@ -145,7 +145,11 @@ export function attachBridge(browser: WebSocket, session: Session) {
     queue.push({ echo, parts: parts.wire });
   });
 
+  const kick = setTimeout(() => {
+    if (browser.readyState === WebSocket.OPEN) browser.close();
+  }, Math.max(0, session.exp * 1000 - Date.now()));
   browser.on("close", () => {
+    clearTimeout(kick);
     closed = true;
     attempt += 1;
     upstream?.close();

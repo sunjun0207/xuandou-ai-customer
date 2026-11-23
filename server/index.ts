@@ -5,7 +5,7 @@ import type { Duplex } from "stream";
 import next from "next";
 import { WebSocketServer } from "ws";
 import { isAdminApi, proxyAdmin } from "./admin-proxy";
-import { handleLogin, handleLogout, handleMe, sendJson } from "./auth";
+import { handleLogin, handleLogout, handleMe, handleRefresh, sendJson } from "./auth";
 import { attachBridge } from "./bridge";
 import { readSession } from "./session";
 import { handleUpload } from "./upload";
@@ -28,6 +28,10 @@ async function main() {
     }
     if (pathname === "/api/auth/logout" && req.method === "POST") {
       handleLogout(req, res).catch(() => sendJson(res, 500, { error: "注销失败" }));
+      return;
+    }
+    if (pathname === "/api/auth/refresh" && req.method === "POST") {
+      handleRefresh(req, res).catch(() => sendJson(res, 401, { error: "登录已过期" }));
       return;
     }
     if (pathname === "/api/auth/me" && req.method === "GET") {
