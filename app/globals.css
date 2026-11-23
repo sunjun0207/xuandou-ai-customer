@@ -243,16 +243,114 @@ button { cursor: pointer; }
 .send:hover { background: var(--blue-press); }
 .send:disabled { opacity: 0.35; cursor: default; }
 
-.link-row { display: flex; gap: 8px; padding: 4px 6px 6px; }
-.link-row input {
-  flex: 1;
-  height: 34px;
-  border-radius: 10px;
-  border: 1px solid var(--line);
-  padding: 0 10px;
-  outline: none;
+.picked { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 4px 6px; }
+.picked-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 0;
+  background: #eef2ff;
+  color: #2437c8;
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 13px;
 }
-.link-row input:focus { border-color: var(--blue); }
+.project-menu {
+  display: grid;
+  gap: 4px;
+  max-height: 220px;
+  overflow: auto;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--line);
+}
+.project-option {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  border-radius: 10px;
+  cursor: pointer;
+}
+.project-option:hover, .project-option.on { background: #f4f6ff; }
+.project-option input { accent-color: var(--blue); }
+.project-option b { display: block; font-weight: 600; }
+.project-option small, .project-empty { color: var(--muted); font-size: 12px; }
+.project-empty { margin: 8px; }
+.project-empty a { color: var(--blue); }
+
+.console { min-height: 100dvh; display: flex; background: #f7f7f8; }
+.console-side {
+  width: 240px;
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  padding: 18px 14px;
+  background: #fff;
+  border-right: 1px solid var(--line);
+}
+.console-side .side-head { text-decoration: none; color: inherit; }
+.console-back, .console-side nav a {
+  display: block;
+  padding: 10px 12px;
+  border-radius: 10px;
+  color: inherit;
+  text-decoration: none;
+}
+.console-back { margin-bottom: 8px; color: #3f3f46; }
+.console-side nav { display: grid; gap: 4px; flex: 1; }
+.console-side nav a.on, .console-back:hover, .console-side nav a:hover { background: #ececef; }
+.console-main { flex: 1; padding: 28px 32px 48px; }
+.console-main h1 { margin: 0; font-size: 28px; }
+.console-main header p { margin: 8px 0 0; color: #667085; max-width: 640px; }
+.console-form {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: end;
+  margin: 22px 0;
+  padding: 16px;
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+}
+.console-form label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: #475467; min-width: 180px; }
+.console-form label.wide { flex: 1; min-width: 240px; }
+.console-form input, .console-form select {
+  height: 40px;
+  border-radius: 10px;
+  border: 1px solid #e4e4e7;
+  padding: 0 12px;
+  background: #fff;
+}
+.console-form input:focus, .console-form select:focus { outline: 2px solid #d9e2ff; border-color: var(--blue); }
+.console-form .btn-primary { height: 40px; padding: 0 16px; }
+.console-form .btn-primary:disabled { opacity: 0.5; }
+.project-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 14px; }
+.project-card {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 16px;
+  display: grid;
+  gap: 12px;
+}
+.project-card h2 { margin: 0; font-size: 18px; }
+.project-card p { margin: 4px 0 0; color: var(--muted); }
+.project-card dl { margin: 0; display: grid; gap: 8px; }
+.project-card dt { font-size: 12px; color: var(--muted); }
+.project-card dd { margin: 2px 0 0; font-family: ui-monospace, Consolas, monospace; font-size: 13px; word-break: break-all; }
+.console-table { background: #fff; border: 1px solid var(--line); border-radius: 16px; overflow: auto; }
+.console-table table { width: 100%; border-collapse: collapse; }
+.console-table th, .console-table td { text-align: left; padding: 12px 14px; border-bottom: 1px solid #f1f5f9; font-size: 14px; }
+.console-table th { color: #667085; font-weight: 600; }
+
+@media (max-width: 800px) {
+  .console { display: block; }
+  .console-side { width: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+  .console-side nav { grid-auto-flow: column; overflow: auto; }
+  .console-main { padding: 20px 16px 40px; }
+}
 
 .chips { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; padding: 0 2px; }
 .chip {

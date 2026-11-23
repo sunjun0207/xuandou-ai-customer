@@ -2,29 +2,30 @@
 
 import { useEffect, useState, type FormEvent } from "react";
 import { usePathname, useRouter } from "next/navigation";
+import { Mark } from "../../mark";
 
 type Menu = { id: string; name: string; path: string; perm: string };
 type Row = Record<string, string | number>;
 
-const fields: Record<string, { key: string; label: string }[]> = {
+const fields: Record<string, { key: string; label: string; wide?: boolean }[]> = {
   projects: [
-    { key: "name", label: "名称" },
-    { key: "code", label: "编码" },
+    { key: "name", label: "项目名称" },
+    { key: "code", label: "项目编码" },
   ],
   tasks: [
-    { key: "projectId", label: "项目 ID" },
-    { key: "title", label: "标题" },
+    { key: "projectId", label: "所属项目" },
+    { key: "title", label: "任务标题", wide: true },
   ],
   problems: [
-    { key: "projectId", label: "项目 ID" },
-    { key: "title", label: "标题" },
-    { key: "detail", label: "说明" },
+    { key: "projectId", label: "所属项目" },
+    { key: "title", label: "问题标题" },
+    { key: "detail", label: "说明", wide: true },
   ],
   users: [
     { key: "username", label: "账号" },
     { key: "password", label: "密码" },
     { key: "displayName", label: "显示名" },
-    { key: "roleId", label: "角色 ID" },
+    { key: "roleId", label: "角色编号" },
   ],
   roles: [
     { key: "code", label: "编码" },
@@ -37,14 +38,36 @@ const fields: Record<string, { key: string; label: string }[]> = {
   ],
 };
 
+const labels: Record<string, string> = {
+  id: "编号",
+  name: "名称",
+  code: "编码",
+  status: "状态",
+  createdAt: "创建时间",
+  title: "标题",
+  projectId: "项目编号",
+  taskId: "任务编号",
+  detail: "说明",
+  username: "账号",
+  displayName: "显示名",
+  roleId: "角色编号",
+  roleName: "角色",
+  path: "路径",
+  perm: "权限",
+  ownerUserId: "负责人",
+  assigneeUserId: "执行人",
+};
+
 export default function ConsolePage() {
   const router = useRouter();
   const pathname = usePathname();
   const view = pathname.split("/").filter(Boolean)[1] || "projects";
   const [menus, setMenus] = useState<Menu[]>([]);
   const [items, setItems] = useState<Row[]>([]);
+  const [projects, setProjects] = useState<Row[]>([]);
   const [form, setForm] = useState<Record<string, string>>({});
   const [error, setError] = useState("");
+  const [pending, setPending] = useState(false);
 
   useEffect(() => {
     api("/api/auth/me?menus=1")
@@ -65,16 +88,23 @@ export default function ConsolePage() {
         }
         setError(reason.message);
       });
+    if (view === "tasks" || view === "problems") {
+      api("/api/projects")
+        .then((data) => setProjects(data.items || []))
+        .catch(() => setProjects([]));
+    }
   }, [view, router, pathname]);
 
   async function createItem(event: FormEvent) {
     event.preventDefault();
+    setPending(true);
     setError("");
     const response = await fetch(`/api/${view}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(form),
     });
+    setPending(false);
     if (response.status === 401) {
       router.replace(`/login?next=${encodeURIComponent(pathname)}`);
       return;
@@ -88,73 +118,145 @@ export default function ConsolePage() {
     setItems(data.items || []);
   }
 
+  async function removeItem(id: string) {
+    const response = await fetch(`/api/${view}/${id}`, { method: "DELETE" });
+    if (!response.ok) {
+      setError(response.status === 409 ? "这条记录还被引用，不能删除" : await response.text());
+      return;
+    }
+    setItems((prev) => prev.filter((item) => String(item.id) !== id));
+  }
+
   async function logout() {
     await fetch("/api/auth/logout", { method: "POST" });
     router.replace("/login");
   }
 
-  const columns = items[0] ? Object.keys(items[0]).filter((key) => key !== "detail") : [];
+  const title = menus.find((menu) => menu.path.endsWith("/" + view))?.name || "项目";
+  const columns = items[0] ? Object.keys(items[0]).filter((key) => key !== "detail" && key !== "ownerUserId" && key !== "assigneeUserId") : [];
 
   return (
-    <div style={{ display: "flex", minHeight: "100vh" }}>
-      <aside style={{ width: 220, background: "#111827", color: "#fff", padding: 16 }}>
-        <strong>功能菜单</strong>
-        <nav style={{ display: "grid", gap: 8, marginTop: 16 }}>
-          <a href="/" style={{ color: "#fff", textDecoration: "none" }}>
-            对话
-          </a>
+    <div className="console">
+      <aside className="console-side">
+        <a className="side-head" href="/">
+          <Mark />
+          <strong>炫兜</strong>
+        </a>
+        <a className="console-back" href="/">
+          返回对话
+        </a>
+        <nav>
           {menus.map((menu) => (
-            <a key={menu.id} href={menu.path} style={{ color: menu.path.endsWith("/" + view) ? "#93c5fd" : "#fff", textDecoration: "none" }}>
+            <a key={menu.id} href={menu.path} className={menu.path.endsWith("/" + view) ? "on" : ""}>
               {menu.name}
             </a>
           ))}
         </nav>
-        <button onClick={logout} style={{ marginTop: 24, background: "transparent", color: "#fff", border: "1px solid #374151", borderRadius: 8, padding: "6px 10px" }}>
+        <button type="button" className="text-btn" onClick={logout}>
           退出
         </button>
       </aside>
-      <main style={{ flex: 1, padding: 24 }}>
-        <h1 style={{ marginTop: 0 }}>{menus.find((menu) => menu.path.endsWith("/" + view))?.name || view}</h1>
-        <form onSubmit={createItem} style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
-          {(fields[view] || []).map((field) => (
-            <input
-              key={field.key}
-              placeholder={field.label}
-              value={form[field.key] || ""}
-              onChange={(event) => setForm({ ...form, [field.key]: event.target.value })}
-              style={{ padding: "8px 10px", border: "1px solid #d0d5dd", borderRadius: 8 }}
-            />
-          ))}
-          <button type="submit" style={{ padding: "8px 12px", background: "#1d4ed8", color: "#fff", border: 0, borderRadius: 8 }}>
-            新增
+      <main className="console-main">
+        <header>
+          <h1>{title}</h1>
+          {view === "projects" ? <p>对话里按名称选择项目。每个项目有一个雪花编号，发送时再为这次提问生成一个问题编号。</p> : null}
+        </header>
+        <form className="console-form" onSubmit={createItem}>
+          {(fields[view] || []).map((field) =>
+            field.key === "projectId" && projects.length ? (
+              <label key={field.key} className={field.wide ? "wide" : ""}>
+                <span>{field.label}</span>
+                <select value={form.projectId || ""} onChange={(event) => setForm({ ...form, projectId: event.target.value })}>
+                  <option value="">选择项目</option>
+                  {projects.map((item) => (
+                    <option key={String(item.id)} value={String(item.id)}>
+                      {String(item.name)} · {String(item.code)}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : (
+              <label key={field.key} className={field.wide ? "wide" : ""}>
+                <span>{field.label}</span>
+                <input value={form[field.key] || ""} onChange={(event) => setForm({ ...form, [field.key]: event.target.value })} />
+              </label>
+            ),
+          )}
+          <button className="btn-primary" type="submit" disabled={pending}>
+            {pending ? "正在保存…" : "添加"}
           </button>
         </form>
-        {error ? <p style={{ color: "#b42318" }}>{error}</p> : null}
-        <table style={{ width: "100%", borderCollapse: "collapse", background: "#fff" }}>
-          <thead>
-            <tr>
-              {columns.map((column) => (
-                <th key={column} style={{ textAlign: "left", padding: 8, borderBottom: "1px solid #e5e7eb" }}>
-                  {column}
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {items.map((item) => (
-              <tr key={String(item.id)}>
-                {columns.map((column) => (
-                  <td key={column} style={{ padding: 8, borderBottom: "1px solid #f1f5f9" }}>
-                    {String(item[column] ?? "")}
-                  </td>
+        {error ? <p className="toast">{error}</p> : null}
+        {view === "projects" ? (
+          <div className="project-grid">
+            {items.length ? (
+              items.map((item) => (
+                <article key={String(item.id)} className="project-card">
+                  <div>
+                    <h2>{String(item.name || "未命名")}</h2>
+                    <p>{String(item.code || "")}</p>
+                  </div>
+                  <dl>
+                    <div>
+                      <dt>项目编号</dt>
+                      <dd>{String(item.id)}</dd>
+                    </div>
+                    <div>
+                      <dt>状态</dt>
+                      <dd>{Number(item.status) === 0 ? "已关闭" : "进行中"}</dd>
+                    </div>
+                  </dl>
+                  <button type="button" className="text-btn" onClick={() => removeItem(String(item.id))}>
+                    删除
+                  </button>
+                </article>
+              ))
+            ) : (
+              <p className="project-empty">还没有项目。填写名称和编码后添加，对话里就能选到。</p>
+            )}
+          </div>
+        ) : (
+          <div className="console-table">
+            <table>
+              <thead>
+                <tr>
+                  {columns.map((column) => (
+                    <th key={column}>{labels[column] || column}</th>
+                  ))}
+                  <th />
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((item) => (
+                  <tr key={String(item.id)}>
+                    {columns.map((column) => (
+                      <td key={column}>{showCell(column, item[column])}</td>
+                    ))}
+                    <td>
+                      <button type="button" className="text-btn" onClick={() => removeItem(String(item.id))}>
+                        删除
+                      </button>
+                    </td>
+                  </tr>
                 ))}
-              </tr>
-            ))}
-          </tbody>
-        </table>
+              </tbody>
+            </table>
+            {items.length ? null : <p className="project-empty">这里还没有记录。</p>}
+          </div>
+        )}
       </main>
     </div>
   );
+}
+
+function showCell(column: string, value: string | number | undefined): string {
+  if (column === "status") {
+    if (value === 1 || value === "1" || value === "open") return "进行中";
+    if (value === 0 || value === "0") return "已关闭";
+    if (value === "doing") return "处理中";
+    if (value === "done" || value === "resolved") return "已完成";
+  }
+  return String(value ?? "");
 }
 
 async function api(path: string) {

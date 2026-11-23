@@ -33,6 +33,7 @@ export type ClientFrame =
       clientMsgId: string;
       text: string;
       projectId: string;
+      projectIds: string[];
       problemId: string;
     }
   | {
@@ -41,6 +42,7 @@ export type ClientFrame =
       clientMsgId: string;
       text: string;
       projectId: string;
+      projectIds: string[];
       problemId: string;
       requestId: string;
       decision: "accept" | "reject";
@@ -51,6 +53,7 @@ export type ClientFrame =
       clientMsgId: string;
       text: string;
       projectId: string;
+      projectIds: string[];
       problemId: string;
       name: string;
       mime: string;
@@ -121,19 +124,20 @@ export function parseClientFrame(value: unknown): ClientFrame | undefined {
   const conversationId = clipId(frame.conversationId, CONV_RE);
   const clientMsgId = clipId(frame.clientMsgId, ID_RE);
   if (!conversationId || !clientMsgId) return undefined;
-  const projectId = clip(frame.projectId, 64);
+  const projectIds = projectList(frame);
+  const projectId = projectIds[0] || clip(frame.projectId, 64);
   const problemId = clip(frame.problemId, 64);
   if (frame.type === "send") {
     const text = clip(frame.text, 8000);
     if (!text) return undefined;
-    return { type: "send", conversationId, clientMsgId, text, projectId, problemId };
+    return { type: "send", conversationId, clientMsgId, text, projectId, projectIds: projectIds.length ? projectIds : projectId ? [projectId] : [], problemId };
   }
   if (frame.type === "confirm") {
     const decision = frame.decision === "accept" || frame.decision === "reject" ? frame.decision : "";
     const requestId = clipId(frame.requestId, LOOSE_RE);
     const text = clip(frame.text, 8000) || (decision === "accept" ? "同意" : "");
     if (!decision || !requestId || !text) return undefined;
-    return { type: "confirm", conversationId, clientMsgId, text, projectId, problemId, requestId, decision };
+    return { type: "confirm", conversationId, clientMsgId, text, projectId, projectIds: projectIds.length ? projectIds : projectId ? [projectId] : [], problemId, requestId, decision };
   }
   if (frame.type === "file") {
     const name = clip(frame.name, 120);
@@ -141,7 +145,7 @@ export function parseClientFrame(value: unknown): ClientFrame | undefined {
     const dataBase64 = typeof frame.dataBase64 === "string" ? frame.dataBase64 : "";
     const text = clip(frame.text, 8000);
     if (!name || !dataBase64) return undefined;
-    return { type: "file", conversationId, clientMsgId, text, projectId, problemId, name, mime, dataBase64 };
+    return { type: "file", conversationId, clientMsgId, text, projectId, projectIds: projectIds.length ? projectIds : projectId ? [projectId] : [], problemId, name, mime, dataBase64 };
   }
   return undefined;
 }
@@ -152,6 +156,7 @@ export function buildFrpPayload(input: {
   clientMsgId: string;
   body: string;
   projectId: string;
+  projectIds?: string[];
   problemId: string;
   accountId: string;
   requestId?: string;
@@ -166,6 +171,7 @@ export function buildFrpPayload(input: {
     clientMsgId: input.clientMsgId,
     body: input.body,
     projectId: input.projectId,
+    projectIds: input.projectIds && input.projectIds.length ? input.projectIds : input.projectId ? [input.projectId] : [],
     problemId: input.problemId,
     accountId: input.accountId,
     requestId: input.requestId || "",
@@ -320,6 +326,12 @@ function preferId(prev: string, next: string): string {
   if (/^\d{10,}$/.test(next)) return next;
   if (/^\d{10,}$/.test(prev)) return prev;
   return next || prev;
+}
+
+function projectList(frame: Record<string, unknown>): string[] {
+  const raw = Array.isArray(frame.projectIds) ? frame.projectIds : [];
+  const ids = raw.map((item) => clip(item, 64)).filter((item) => item.length > 0);
+  return [...new Set(ids)].slice(0, 20);
 }
 
 function clip(value: unknown, max: number): string {

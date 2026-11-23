@@ -5,11 +5,13 @@ import { useRouter } from "next/navigation";
 import { Mark } from "./mark";
 import { RichText } from "./rich-text";
 import { blankMessage, mergeMessage, newId, type ChatMessage, type ServerFrame, type UpstreamState } from "../shared/protocol";
+import { nextSnowflake } from "../shared/snowflake";
 
 type User = { userId: string; username: string; displayName: string; roleCode: string };
 type Conv = { id: string; title: string; updatedAt: number; messages: ChatMessage[] };
 type DraftFile = { name: string; mime: string; dataBase64: string };
 type Confirming = { requestId: string; conversationId: string; quote: string };
+type Project = { id: string; name: string; code: string; status: number };
 
 const SUGGESTIONS = ["我想提一个新需求，先帮我把边界问清楚", "帮我看一下当前需求做到哪一步了", "这个改动如果要跨系统，先列出要确认的点"];
 
@@ -21,8 +23,8 @@ export function ChatApp() {
   const [convs, setConvs] = useState<Conv[]>([]);
   const [activeId, setActiveId] = useState("");
   const [draft, setDraft] = useState("");
-  const [projectId, setProjectId] = useState("");
-  const [problemId, setProblemId] = useState("");
+  const [pickedIds, setPickedIds] = useState<string[]>([]);
+  const [projects, setProjects] = useState<Project[]>([]);
   const [showLink, setShowLink] = useState(false);
   const [upstream, setUpstream] = useState<UpstreamState>("connecting");
   const [nav, setNav] = useState(true);
@@ -51,13 +53,13 @@ export function ChatApp() {
           const saved = JSON.parse(localStorage.getItem(storageKey(body.user.username)) || "null") as {
             convs?: Conv[];
             activeId?: string;
+            projectIds?: string[];
             projectId?: string;
-            problemId?: string;
           } | null;
           if (saved?.convs) setConvs(saved.convs);
           if (typeof saved?.activeId === "string") setActiveId(saved.activeId);
-          if (typeof saved?.projectId === "string") setProjectId(saved.projectId);
-          if (typeof saved?.problemId === "string") setProblemId(saved.problemId);
+          if (Array.isArray(saved?.projectIds)) setPickedIds(saved.projectIds.filter((item) => typeof item === "string"));
+          else if (typeof saved?.projectId === "string" && saved.projectId) setPickedIds([saved.projectId]);
         } catch {
           // 本地没有可用的会话缓存。
         }
@@ -72,8 +74,16 @@ export function ChatApp() {
 
   useEffect(() => {
     if (!user || !hydrated) return;
-    localStorage.setItem(storageKey(user.username), JSON.stringify({ convs: trim(convs), activeId, projectId, problemId }));
-  }, [user, hydrated, convs, activeId, projectId, problemId]);
+    localStorage.setItem(storageKey(user.username), JSON.stringify({ convs: trim(convs), activeId, projectIds: pickedIds }));
+  }, [user, hydrated, convs, activeId, pickedIds]);
+
+  useEffect(() => {
+    if (!user) return;
+    fetch("/api/projects")
+      .then(async (res) => (res.ok ? ((await res.json()) as { items?: Project[] }) : { items: [] }))
+      .then((data) => setProjects(Array.isArray(data.items) ? data.items.filter((item) => item.status !== 0) : []))
+      .catch(() => setProjects([]));
+  }, [user]);
 
   useEffect(() => {
     if (!user || !hydrated) return;
@@ -142,7 +152,11 @@ export function ChatApp() {
     if (!text && !file) return;
     const conversationId = activeId || newId("c");
     const clientMsgId = newId("m");
-    const linked = { projectId: projectId.trim(), problemId: problemId.trim() };
+    const projectIds = pickedIds.filter((id) => {
+      const found = projects.find((item) => item.id === id);
+      return !found || found.status !== 0;
+    });
+    const linked = { projectId: projectIds[0] || "", projectIds, problemId: projectIds.length ? nextSnowflake() : "" };
     if (!activeId) setActiveId(conversationId);
     if (file) {
       socket.send(JSON.stringify({ type: "file", conversationId, clientMsgId, text, name: file.name, mime: file.mime, dataBase64: file.dataBase64, ...linked }));
@@ -156,6 +170,7 @@ export function ChatApp() {
           decision: "reject",
           text: text || "需要调整",
           projectId: linked.projectId,
+          projectIds: linked.projectIds,
           problemId: linked.problemId,
         }),
       );
@@ -167,6 +182,10 @@ export function ChatApp() {
     setConfirming(null);
     setError("");
     if (boxRef.current) boxRef.current.style.height = "";
+  }
+
+  function toggleProject(id: string) {
+    setPickedIds((prev) => (prev.includes(id) ? prev.filter((item) => item !== id) : [...prev, id]));
   }
 
   function accept(message: ChatMessage) {
@@ -183,8 +202,9 @@ export function ChatApp() {
         requestId: message.requestId,
         decision: "accept",
         text: "同意",
-        projectId: projectId.trim(),
-        problemId: problemId.trim(),
+        projectId: pickedIds[0] || "",
+        projectIds: pickedIds,
+        problemId: pickedIds.length ? nextSnowflake() : "",
       }),
     );
   }
@@ -286,10 +306,9 @@ export function ChatApp() {
               error={error}
               showLink={showLink}
               setShowLink={setShowLink}
-              projectId={projectId}
-              problemId={problemId}
-              setProjectId={setProjectId}
-              setProblemId={setProblemId}
+              projects={projects}
+              pickedIds={pickedIds}
+              onToggle={toggleProject}
               fileRef={fileRef}
               onFile={onFile}
               onSend={() => send()}
@@ -323,10 +342,9 @@ export function ChatApp() {
                 error={error}
                 showLink={showLink}
                 setShowLink={setShowLink}
-                projectId={projectId}
-                problemId={problemId}
-                setProjectId={setProjectId}
-                setProblemId={setProblemId}
+                projects={projects}
+                pickedIds={pickedIds}
+                onToggle={toggleProject}
                 fileRef={fileRef}
                 onFile={onFile}
                 onSend={() => send()}
@@ -411,10 +429,9 @@ function Composer({
   error,
   showLink,
   setShowLink,
-  projectId,
-  problemId,
-  setProjectId,
-  setProblemId,
+  projects,
+  pickedIds,
+  onToggle,
   fileRef,
   onFile,
   onSend,
@@ -429,14 +446,14 @@ function Composer({
   error: string;
   showLink: boolean;
   setShowLink: (value: boolean) => void;
-  projectId: string;
-  problemId: string;
-  setProjectId: (value: string) => void;
-  setProblemId: (value: string) => void;
+  projects: Project[];
+  pickedIds: string[];
+  onToggle: (id: string) => void;
   fileRef: { current: HTMLInputElement | null };
   onFile: (list: FileList | null) => void;
   onSend: () => void;
 }) {
+  const picked = projects.filter((item) => pickedIds.includes(item.id));
   return (
     <div className="composer-wrap">
       {error ? <div className="toast">{error}</div> : null}
@@ -455,6 +472,16 @@ function Composer({
             <button type="button" onClick={clearFile} aria-label="移除附件">
               ×
             </button>
+          </div>
+        ) : null}
+        {picked.length ? (
+          <div className="picked">
+            {picked.map((item) => (
+              <button key={item.id} type="button" className="picked-chip" onClick={() => onToggle(item.id)}>
+                {item.name}
+                <span aria-hidden="true">×</span>
+              </button>
+            ))}
           </div>
         ) : null}
         <textarea
@@ -481,8 +508,8 @@ function Composer({
               <Clip />
             </button>
             <input ref={fileRef} type="file" hidden onChange={(event) => onFile(event.target.files)} />
-            <button type="button" className={showLink ? "text-btn on" : "text-btn"} onClick={() => setShowLink(!showLink)}>
-              关联项目
+            <button type="button" className={showLink || picked.length ? "text-btn on" : "text-btn"} onClick={() => setShowLink(!showLink)}>
+              关联项目{picked.length ? ` · ${picked.length}` : ""}
             </button>
           </div>
           <button className="send" type="button" aria-label="发送" disabled={!draft.trim() && !file} onClick={onSend}>
@@ -490,9 +517,25 @@ function Composer({
           </button>
         </div>
         {showLink ? (
-          <div className="link-row">
-            <input value={projectId} placeholder="项目 ID" aria-label="项目 ID" onChange={(event) => setProjectId(event.target.value)} />
-            <input value={problemId} placeholder="问题 ID" aria-label="问题 ID" onChange={(event) => setProblemId(event.target.value)} />
+          <div className="project-menu" role="group" aria-label="选择项目">
+            {projects.length ? (
+              projects.map((item) => {
+                const on = pickedIds.includes(item.id);
+                return (
+                  <label key={item.id} className={on ? "project-option on" : "project-option"}>
+                    <input type="checkbox" checked={on} onChange={() => onToggle(item.id)} />
+                    <span>
+                      <b>{item.name}</b>
+                      <small>{item.code}</small>
+                    </span>
+                  </label>
+                );
+              })
+            ) : (
+              <p className="project-empty">
+                还没有可选项目。<a href="/app/projects">去项目后台添加</a>
+              </p>
+            )}
           </div>
         ) : null}
       </div>
