@@ -188,17 +188,7 @@ export function buildFrpPayload(input: {
   });
 }
 
-type Saved = {
-  id?: unknown;
-  msgType?: unknown;
-  content?: unknown;
-  userId?: unknown;
-  projectId?: unknown;
-  problemId?: unknown;
-  time?: unknown;
-};
-
-export function fromFrpSaved(saved: Saved, selfUserId: string): { type: "message"; message: ChatMessage } | { type: "delta"; message: ChatMessage; done: boolean } | undefined {
+export function fromFrpSaved(saved: Record<string, unknown>, selfUserId: string): { type: "message"; message: ChatMessage } | { type: "delta"; message: ChatMessage; done: boolean } | undefined {
   const id = clip(saved.id, 32);
   const msgType = clip(saved.msgType, 16);
   const content = typeof saved.content === "string" ? saved.content : "";

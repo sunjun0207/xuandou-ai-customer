@@ -208,7 +208,9 @@ button { cursor: pointer; }
 .thread-inner { padding: 8px 24px 24px; display: flex; flex-direction: column; gap: 22px; }
 
 .msg-user { display: flex; justify-content: flex-end; }
+.msg-user.editing { justify-content: stretch; margin-left: -24px; margin-right: -24px; }
 .msg-col { display: flex; flex-direction: column; align-items: flex-end; max-width: min(640px, 88%); min-width: 0; }
+.msg-user.editing .msg-col { width: 100%; max-width: none; align-items: stretch; }
 .msg-user .bubble { max-width: 100%; }
 .msg-time { display: block; margin-top: 6px; color: var(--muted); font-size: 12px; line-height: 1.4; font-variant-numeric: tabular-nums; }
 .msg-actions { display: flex; align-items: center; gap: 2px; margin-top: 4px; }
@@ -228,12 +230,12 @@ button { cursor: pointer; }
 .msg-tool:disabled { opacity: 0.35; cursor: default; }
 .msg-tool:disabled:hover { background: transparent; color: #8b8b96; }
 .msg-edit {
-  width: min(560px, 100%);
+  width: 100%;
   background: #fff;
-  border: 1px solid #e4e4e8;
-  border-radius: 16px;
-  padding: 10px 12px 8px;
-  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+  border: 1px solid #c5d4ff;
+  border-radius: 24px;
+  padding: 12px 12px 8px;
+  box-shadow: var(--shadow);
 }
 .msg-edit textarea {
   width: 100%;
@@ -242,11 +244,12 @@ button { cursor: pointer; }
   outline: none;
   background: transparent;
   line-height: 1.6;
-  min-height: 72px;
+  min-height: 52px;
   max-height: 220px;
-  padding: 0;
+  padding: 4px 6px 0;
+  font: inherit;
 }
-.msg-edit-bar { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.msg-edit-bar { display: flex; justify-content: flex-end; align-items: center; gap: 8px; margin-top: 8px; }
 .msg-edit-cancel, .msg-edit-send { border: 0; border-radius: 999px; height: 32px; padding: 0 14px; }
 .msg-edit-cancel { background: #f4f4f5; }
 .msg-edit-cancel:hover { background: #ececef; }
@@ -366,8 +369,45 @@ button { cursor: pointer; }
   overflow: hidden;
   border: 1px solid var(--line);
   background: #f6f1e8;
+  padding: 0;
+  cursor: zoom-in;
 }
 .attach-shot img { display: block; width: 100%; height: auto; }
+
+.viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  background: rgba(12, 14, 20, 0.88);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 72px 84px 48px;
+}
+.viewer figure { margin: 0; max-width: min(960px, 100%); }
+.viewer img {
+  display: block;
+  max-width: min(960px, 100%);
+  max-height: calc(100vh - 150px);
+  object-fit: contain;
+  border-radius: 8px;
+  background: #111;
+}
+.viewer figcaption { color: #fff; text-align: center; margin-top: 12px; font-size: 13px; }
+.viewer-close, .viewer-nav {
+  position: absolute;
+  border: 0;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+}
+.viewer-close { top: 16px; right: 16px; width: 40px; height: 40px; font-size: 26px; line-height: 1; }
+.viewer-nav { top: 50%; width: 44px; height: 44px; margin-top: -22px; font-size: 30px; line-height: 1; }
+.viewer-nav.prev { left: 16px; }
+.viewer-nav.next { right: 16px; }
+.viewer-close:hover, .viewer-nav:hover { background: rgba(255, 255, 255, 0.28); }
 
 .size-limit {
   color: var(--muted);
@@ -670,6 +710,8 @@ button { cursor: pointer; }
   .app.nav .scrim { display: block; position: fixed; inset: 0; border: 0; background: rgba(0, 0, 0, 0.28); z-index: 4; }
   .hero { padding: 0 16px 4vh; }
   .thread-inner, .dock { padding-left: 16px; padding-right: 16px; }
+  .msg-user.editing { margin-left: -16px; margin-right: -16px; }
+  .viewer { padding: 64px 56px 28px; }
   .hero-copy h1 { font-size: 24px; }
   .link-state { font-size: 0; }
   .link-state i { font-size: 0; }

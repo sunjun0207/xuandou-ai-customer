@@ -10,4 +10,4 @@ COPY . .
 RUN npm run build
 
 EXPOSE 4100
-CMD ["npx", "tsx", "--env-file=.env.pro", "server/index.ts"]
+CMD ["npm", "start"]

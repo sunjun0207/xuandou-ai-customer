@@ -1,9 +1,7 @@
-"use client";
-
 import { useEffect, useState, type FormEvent } from "react";
-import { usePathname, useRouter } from "next/navigation";
-import { Mark } from "../../mark";
-import { endSession, ensureSession, watchSession } from "../../session";
+import { Mark } from "@/components/mark";
+import { apiFetch, endSession, ensureSession, watchSession } from "@/api/session";
+import { usePathname, useRouter } from "@/router";
 
 type Menu = { id: string; name: string; menuCode?: string; path: string; perm: string; parentId?: string; status?: number; sortNo?: number };
 type Role = { id: string; code: string; name: string; description?: string; status?: number; menuIds?: string[] };
@@ -52,9 +50,26 @@ export default function ConsolePage() {
   }, [router, pathname]);
 
   useEffect(() => {
-    api("/api/auth/me?menus=1")
-      .then((data) => setMenus((data.menus || []).filter((menu: Menu) => menu.path !== "/app/tasks" && menu.perm !== "task" && menu.menuCode !== "task")))
-      .catch(() => router.replace(`/login?next=${encodeURIComponent(pathname)}`));
+    let stop = false;
+    ensureSession()
+      .then((ok) => {
+        if (!ok) {
+          router.replace(`/login?next=${encodeURIComponent(pathname)}`);
+          return null;
+        }
+        if (stop) return null;
+        return api("/api/auth/me?menus=1");
+      })
+      .then((data) => {
+        if (stop || !data) return;
+        setMenus((data.menus || []).filter((menu: Menu) => menu.path !== "/app/tasks" && menu.perm !== "task" && menu.menuCode !== "task"));
+      })
+      .catch(() => {
+        if (!stop) router.replace(`/login?next=${encodeURIComponent(pathname)}`);
+      });
+    return () => {
+      stop = true;
+    };
   }, [router, pathname]);
 
   useEffect(() => {
@@ -239,7 +254,7 @@ export default function ConsolePage() {
     setError("");
     const path = editing ? `/api/${view}/${editing}` : `/api/${view}`;
     const payload = view === "problems" ? { projectId: form.projectId || "", title: form.title || "", text: form.title || "", detail: form.detail || "" } : form;
-    const response = await fetch(path, {
+    const response = await apiFetch(path, {
       method: editing ? "PATCH" : "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
@@ -255,7 +270,7 @@ export default function ConsolePage() {
     }
     const roleId = view === "roles" ? editing || String((await response.json()).id || "") : form.roleId;
     if ((view === "users" || view === "roles") && roleId && (menusTouched || menuIds.length > 0)) {
-      const grant = await fetch(`/api/roles/${roleId}/menus`, {
+      const grant = await apiFetch(`/api/roles/${roleId}/menus`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ menuIds }),
@@ -279,7 +294,7 @@ export default function ConsolePage() {
     if (!target) return;
     setPending(true);
     setError("");
-    const response = await fetch(`/api/${view}/${target.id}`, { method: "DELETE" });
+    const response = await apiFetch(`/api/${view}/${target.id}`, { method: "DELETE" });
     if (!response.ok) {
       setPending(false);
       const text = await response.text();
@@ -828,7 +843,7 @@ async function loadQuestions(keyword: string, page: number, pageSize: number) {
 }
 
 async function api(path: string, allowRefresh = true) {
-  const response = await fetch(path);
+  const response = await apiFetch(path);
   if (response.status === 401 && allowRefresh) {
     const ok = await ensureSession();
     if (!ok) throw new Error("unauthorized");

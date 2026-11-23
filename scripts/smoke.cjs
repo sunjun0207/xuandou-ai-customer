@@ -1,103 +1,84 @@
 const http = require("http");
-const WebSocket = require("ws");
 
 const base = process.env.SMOKE_URL || "http://127.0.0.1:4100";
 const username = process.env.SMOKE_USER || "admin";
 const password = process.env.SMOKE_PASSWORD || "admin123";
 
-function request(method, path, { cookie, body } = {}) {
-  const url = new URL(path, base);
+async function request(method, path, { token, body } = {}) {
+  const headers = {};
+  if (body) headers["Content-Type"] = "application/json";
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const response = await fetch(new URL(path, base), {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  const text = await response.text();
+  let json = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    json = null;
+  }
+  return { status: response.status, json, text };
+}
+
+function openSocket(token) {
+  const target = new URL(base);
+  const path = `/ws?role=external&token=${encodeURIComponent(token)}`;
   return new Promise((resolve, reject) => {
-    const raw = body ? Buffer.from(JSON.stringify(body)) : null;
-    const req = http.request(
-      url,
-      {
-        method,
-        headers: {
-          ...(raw ? { "Content-Type": "application/json", "Content-Length": raw.length } : {}),
-          ...(cookie ? { Cookie: cookie } : {}),
-        },
+    const req = http.request({
+      hostname: target.hostname,
+      port: target.port,
+      path,
+      headers: {
+        Connection: "Upgrade",
+        Upgrade: "websocket",
+        "Sec-WebSocket-Version": "13",
+        "Sec-WebSocket-Key": require("crypto").randomBytes(16).toString("base64"),
       },
-      (res) => {
-        const chunks = [];
-        res.on("data", (chunk) => chunks.push(chunk));
-        res.on("end", () => {
-          const text = Buffer.concat(chunks).toString("utf8");
-          let json = null;
-          try {
-            json = text ? JSON.parse(text) : null;
-          } catch {
-            json = null;
-          }
-          resolve({ status: res.statusCode, headers: res.headers, json, text });
-        });
-      },
-    );
-    req.on("error", reject);
-    if (raw) req.write(raw);
+    });
+    const timer = setTimeout(() => {
+      req.destroy();
+      reject(new Error("ws timeout"));
+    }, 8000);
+    req.on("upgrade", (_res, socket) => {
+      clearTimeout(timer);
+      socket.end();
+      resolve();
+    });
+    req.on("response", (res) => {
+      clearTimeout(timer);
+      reject(new Error(`ws ${res.statusCode}`));
+    });
+    req.on("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
     req.end();
   });
 }
 
-function cookieOf(headers) {
-  const raw = headers["set-cookie"];
-  const first = Array.isArray(raw) ? raw[0] : raw;
-  if (!first) throw new Error("missing cookie");
-  return first.split(";")[0];
-}
-
 async function main() {
   const health = await request("GET", "/api/health");
-  if (health.status !== 200 || !health.json.ok) throw new Error(`health ${health.status}`);
-  const anon = await request("GET", "/api/auth/me");
-  if (anon.status !== 401) throw new Error(`me anon ${anon.status}`);
+  if (health.status !== 200 || !health.json?.ok) throw new Error(`health ${health.status}`);
 
-  await new Promise((resolve, reject) => {
-    const ws = new WebSocket(base.replace(/^http/, "ws") + "/ws");
-    ws.on("unexpected-response", (_req, res) => {
-      if (res.statusCode !== 401) reject(new Error(`ws anon ${res.statusCode}`));
-      else resolve();
-    });
-    ws.on("open", () => reject(new Error("ws anon opened")));
-    ws.on("error", () => {});
-  });
+  const anon = await request("GET", "/api/auth/status");
+  if (anon.status !== 200 || anon.json?.loggedIn !== false) throw new Error(`status anon ${anon.status} ${anon.text}`);
 
   const login = await request("POST", "/api/auth/login", { body: { username, password } });
-  if (login.status !== 200) throw new Error(`login ${login.status} ${login.text}`);
-  const cookie = cookieOf(login.headers);
-  const me = await request("GET", "/api/auth/me", { cookie });
-  if (me.status !== 200 || me.json.user.username !== username) throw new Error("me mismatch");
-
-  const echoed = await new Promise((resolve, reject) => {
-    const ws = new WebSocket(base.replace(/^http/, "ws") + "/ws", { headers: { Cookie: cookie } });
-    const timer = setTimeout(() => reject(new Error("ws timeout")), 8000);
-    ws.on("message", (data) => {
-      const frame = JSON.parse(String(data));
-      if (frame.type === "ready") {
-        ws.send(JSON.stringify({
-          type: "send",
-          conversationId: "c_smoke01",
-          clientMsgId: "m_smoke0001",
-          text: "卫星项目需要一个导出",
-          projectId: "satellite",
-          problemId: "",
-        }));
-      }
-      if (frame.type === "message" && frame.message && frame.message.clientMsgId === "m_smoke0001") {
-        clearTimeout(timer);
-        ws.close();
-        resolve(frame.message);
-      }
-    });
-    ws.on("error", reject);
-  });
-  if (echoed.text !== "卫星项目需要一个导出" || echoed.conversationId !== "c_smoke01") {
-    throw new Error(`echo ${JSON.stringify(echoed)}`);
+  if (login.status !== 200 || !login.json?.accessToken || !login.json?.refreshToken) {
+    throw new Error(`login ${login.status} ${login.text}`);
   }
+  const token = login.json.accessToken;
+  const me = await request("GET", "/api/auth/me", { token });
+  if (me.status !== 200 || me.json?.user?.username !== username) throw new Error(`me ${me.status} ${me.text}`);
 
-  const logout = await request("POST", "/api/auth/logout", { cookie });
+  await openSocket(token);
+
+  const logout = await request("POST", "/api/auth/logout", { token });
   if (logout.status !== 200) throw new Error(`logout ${logout.status}`);
-  const after = await request("GET", "/api/auth/me", { cookie });
+  const after = await request("GET", "/api/auth/me", { token });
   if (after.status !== 401) throw new Error(`me after logout ${after.status}`);
   console.log("smoke ok");
 }

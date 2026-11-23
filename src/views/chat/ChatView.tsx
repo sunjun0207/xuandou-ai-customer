@@ -1,16 +1,14 @@
-"use client";
-
 import { useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
-import { Mark } from "./mark";
-import { RichText } from "./rich-text";
-import { fetchUploadCredential, postQiniu } from "./upload";
-import { blankMessage, mergeMessage, newId, type ChatAttachment, type ChatMessage, type ServerFrame, type UpstreamState } from "../shared/protocol";
-import { nextSnowflake } from "../shared/snowflake";
-import { DEFAULT_MAX_BYTES, displayFileName, extensionOf, formatBytes, formatMaxLabel, isImageFile, MAX_ATTACHMENTS } from "../shared/upload";
-import { endSession, ensureSession, sessionLeaving, watchSession } from "./session";
+import { Mark } from "@/components/mark";
+import { RichText } from "@/components/rich-text";
+import { apiFetch, saveSession, userFrom, wsUrl, endSession, ensureSession, sessionLeaving, watchSession } from "@/api/session";
+import { fetchUploadCredential, postQiniu } from "@/api/upload";
+import { blankMessage, buildFrpPayload, fromFrpSaved, mergeMessage, newId, shanghaiNow, type ChatAttachment, type ChatMessage, type ServerFrame, type UpstreamState } from "@/shared/protocol";
+import { nextSnowflake } from "@/shared/snowflake";
+import { DEFAULT_MAX_BYTES, displayFileName, extensionOf, formatBytes, formatMaxLabel, isImageFile, MAX_ATTACHMENTS } from "@/shared/upload";
+import { useRouter } from "@/router";
 
-type User = { userId: string; username: string; displayName: string; roleCode: string };
+type User = { userId: string; accountId: string; username: string; displayName: string; roleCode: string };
 type ConvMeta = { id: string; title: string; updatedAt: number; renamed?: boolean; pinned?: boolean; pinnedAt?: number };
 type Conv = ConvMeta & { messages: ChatMessage[] };
 type DraftFile = {
@@ -56,6 +54,7 @@ export function ChatApp() {
   const [hint, setHint] = useState("");
   const [hold, setHold] = useState(false);
   const [editingKey, setEditingKey] = useState("");
+  const [gallery, setGallery] = useState<{ items: ChatAttachment[]; index: number } | null>(null);
   const [copiedKey, setCopiedKey] = useState("");
   const wsRef = useRef<WebSocket | null>(null);
   const activeIdRef = useRef(activeId);
@@ -86,15 +85,19 @@ export function ChatApp() {
           router.replace("/login");
           return;
         }
-        const res = await fetch("/api/auth/me");
+        const res = await apiFetch("/api/auth/me");
         if (res.status === 401) {
           router.replace("/login");
           return;
         }
-        const body = (await res.json()) as { user: User };
-        if (stop) return;
-        setUser(body.user);
-        const loaded = await fetch("/api/conversations");
+        const body = (await res.json()) as { user?: { id?: string; username?: string; displayName?: string; roleCode?: string } };
+        const nextUser = userFrom({ user: body.user });
+        if (stop || !nextUser) {
+          if (!stop) router.replace("/login");
+          return;
+        }
+        setUser(nextUser);
+        const loaded = await apiFetch("/api/conversations");
         if (stop) return;
         if (loaded.status === 401) {
           router.replace("/login");
@@ -120,7 +123,7 @@ export function ChatApp() {
     let stop = false;
     const pull = async () => {
       if (stop || document.visibilityState === "hidden") return;
-      const listed = await fetch("/api/conversations");
+      const listed = await apiFetch("/api/conversations");
       if (stop) return;
       if (listed.status === 401) {
         const ok = await ensureSession();
@@ -133,7 +136,7 @@ export function ChatApp() {
       setConvs((prev) => mergeList(prev, items, renameIdRef.current));
       const current = activeIdRef.current;
       if (!current) return;
-      const detail = await fetch(`/api/conversations/${encodeURIComponent(current)}`);
+      const detail = await apiFetch(`/api/conversations/${encodeURIComponent(current)}`);
       if (stop || !detail.ok) return;
       const body = (await detail.json()) as { item?: ConvMeta & { messages?: ChatMessage[] } };
       const messages = Array.isArray(body.item?.messages) ? body.item.messages : [];
@@ -155,7 +158,7 @@ export function ChatApp() {
   useEffect(() => {
     if (!user || !hydrated || !activeId) return;
     let stop = false;
-    fetch(`/api/conversations/${encodeURIComponent(activeId)}`)
+    apiFetch(`/api/conversations/${encodeURIComponent(activeId)}`)
       .then(async (res) => {
         if (stop || !res.ok) return;
         const body = (await res.json()) as { item?: { messages?: ChatMessage[] } };
@@ -170,7 +173,7 @@ export function ChatApp() {
 
   useEffect(() => {
     if (!user) return;
-    fetch("/api/upload/config")
+    apiFetch("/api/upload/config")
       .then(async (res) => (res.ok ? ((await res.json()) as { maxBytes?: number; maxLabel?: string }) : null))
       .then((data) => {
         if (!data || typeof data.maxBytes !== "number" || data.maxBytes <= 0) return;
@@ -178,7 +181,7 @@ export function ChatApp() {
         setMaxLabel(data.maxLabel || formatMaxLabel(data.maxBytes));
       })
       .catch(() => undefined);
-    fetch("/api/projects")
+    apiFetch("/api/projects")
       .then(async (res) => (res.ok ? ((await res.json()) as { items?: Project[] }) : { items: [] }))
       .then((data) => setProjects(Array.isArray(data.items) ? data.items.filter((item) => item.status !== 0) : []))
       .catch(() => setProjects([]));
@@ -190,13 +193,13 @@ export function ChatApp() {
     let timer = 0;
     const connect = () => {
       if (stopped) return;
-      const proto = location.protocol === "https:" ? "wss:" : "ws:";
-      const socket = new WebSocket(`${proto}//${location.host}/ws`);
+      const socket = new WebSocket(wsUrl());
       wsRef.current = socket;
+      socket.onopen = () => setUpstream("open");
       socket.onmessage = (event) => {
-        let frame: ServerFrame;
+        let frame: ServerFrame & Record<string, unknown>;
         try {
-          frame = JSON.parse(String(event.data)) as ServerFrame;
+          frame = JSON.parse(String(event.data)) as ServerFrame & Record<string, unknown>;
         } catch {
           return;
         }
@@ -206,9 +209,22 @@ export function ChatApp() {
           holdRef.current = false;
           setHold(false);
           if (frame.clientMsgId) setConvs((prev) => removeMessage(prev, frame.clientMsgId));
+          return;
         }
-        if (frame.type === "message") setConvs((prev) => applyMessage(prev, inOpenConversation(frame.message, activeIdRef.current)));
-        if (frame.type === "delta") setConvs((prev) => applyDelta(prev, inOpenConversation(frame.message, activeIdRef.current), frame.done));
+        if (frame.type === "message") {
+          setConvs((prev) => applyMessage(prev, inOpenConversation(frame.message, activeIdRef.current)));
+          return;
+        }
+        if (frame.type === "delta") {
+          setConvs((prev) => applyDelta(prev, inOpenConversation(frame.message, activeIdRef.current), frame.done));
+          return;
+        }
+        const raw = frame as Record<string, unknown>;
+        const inbound = fromFrpSaved(raw, user.userId);
+        const savedId = typeof raw.id === "string" ? raw.id : "";
+        if (/^\d{10,}$/.test(savedId)) socket.send(JSON.stringify({ type: "ack", id: savedId }));
+        if (inbound?.type === "message") setConvs((prev) => applyMessage(prev, inOpenConversation(inbound.message, activeIdRef.current)));
+        if (inbound?.type === "delta") setConvs((prev) => applyDelta(prev, inOpenConversation(inbound.message, activeIdRef.current), inbound.done));
       };
       socket.onclose = () => {
         if (wsRef.current !== socket) return;
@@ -284,14 +300,61 @@ export function ChatApp() {
     setEditingKey("");
   }, [activeId]);
 
+  function publish(input: {
+    conversationId: string;
+    clientMsgId: string;
+    text: string;
+    kind: "user" | "confirm" | "file";
+    projectId: string;
+    projectIds: string[];
+    problemId: string;
+    attachments: ChatAttachment[];
+    requestId?: string;
+    decision?: "" | "accept" | "reject";
+  }) {
+    const socket = wsRef.current;
+    if (!socket || socket.readyState !== WebSocket.OPEN || !user) return false;
+    const names = input.attachments.map((item) => item.name).join("、");
+    const body = input.text || names;
+    const first = input.attachments[0];
+    const echo = blankMessage({
+      id: input.clientMsgId,
+      clientMsgId: input.clientMsgId,
+      conversationId: input.conversationId,
+      role: "user",
+      kind: input.kind === "confirm" ? "confirm" : input.text ? "chat" : "file",
+      text: body,
+      time: shanghaiNow(),
+      projectId: input.projectId,
+      problemId: input.problemId,
+      requestId: input.requestId || "",
+      decision: input.decision || "",
+      fileName: first?.name || "",
+      url: first?.url || "",
+      attachments: input.attachments,
+    });
+    setConvs((prev) => applyMessage(prev, echo));
+    socket.send(
+      buildFrpPayload({
+        kind: input.kind,
+        conversationId: input.conversationId,
+        clientMsgId: input.clientMsgId,
+        body,
+        projectId: input.projectId,
+        projectIds: input.projectIds,
+        problemId: input.problemId,
+        accountId: user.accountId,
+        requestId: input.requestId,
+        decision: input.decision,
+        attachments: input.attachments,
+      }),
+    );
+    return true;
+  }
+
   function send(text = draft.trim(), confirm = confirming, reuse?: ChatAttachment[]) {
     const fromComposer = reuse === undefined;
     if ((holdRef.current || awaitingReply(messages)) && !confirm) return;
-    const socket = wsRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
-      setError("连接已断开，这句话还没发出");
-      return;
-    }
     if (fromComposer && files.some((item) => item.status === "uploading")) {
       setError("附件还在上传");
       return;
@@ -310,23 +373,22 @@ export function ChatApp() {
     });
     const linked = { projectId: projectIds[0] || "", projectIds, problemId: projectIds.length ? nextSnowflake() : "", attachments };
     if (!activeId) setActiveId(conversationId);
-    if (confirm) {
-      socket.send(
-        JSON.stringify({
-          type: "confirm",
-          conversationId: confirm.conversationId,
-          clientMsgId,
-          requestId: confirm.requestId,
-          decision: "reject",
-          text: text || "需要调整",
-          projectId: linked.projectId,
-          projectIds: linked.projectIds,
-          problemId: linked.problemId,
-          attachments,
-        }),
-      );
-    } else {
-      socket.send(JSON.stringify({ type: "send", conversationId, clientMsgId, text, ...linked }));
+    const kind = confirm ? "confirm" : text ? "user" : "file";
+    const sent = publish({
+      conversationId: confirm ? confirm.conversationId : conversationId,
+      clientMsgId,
+      text: confirm ? text || "需要调整" : text,
+      kind,
+      projectId: linked.projectId,
+      projectIds: linked.projectIds,
+      problemId: linked.problemId,
+      attachments,
+      requestId: confirm?.requestId,
+      decision: confirm ? "reject" : "",
+    });
+    if (!sent) {
+      setError("连接已断开，这句话还没发出");
+      return;
     }
     if (fromComposer) {
       setDraft("");
@@ -364,8 +426,15 @@ export function ChatApp() {
     copiedTimer.current = window.setTimeout(() => setCopiedKey((current) => (current === key ? "" : current)), 1600);
   }
 
-  function resendEdited(text: string, source: ChatMessage) {
-    send(text.trim(), null, listedAttachments(source));
+  function resendEdited(text: string, attachments: ChatAttachment[]) {
+    send(text.trim(), null, attachments);
+  }
+
+  function openGallery(url: string) {
+    const items = userImages(messages);
+    const index = items.findIndex((item) => item.url === url);
+    if (index < 0) return;
+    setGallery({ items, index });
   }
 
   function regenerate(message: ChatMessage) {
@@ -379,24 +448,24 @@ export function ChatApp() {
   }
 
   function accept(message: ChatMessage) {
-    const socket = wsRef.current;
-    if (!socket || socket.readyState !== WebSocket.OPEN) {
+    const clientMsgId = newId();
+    const projectIds = pickedIds;
+    const sent = publish({
+      conversationId: message.conversationId,
+      clientMsgId,
+      text: "同意",
+      kind: "confirm",
+      projectId: projectIds[0] || "",
+      projectIds,
+      problemId: projectIds.length ? nextSnowflake() : "",
+      attachments: [],
+      requestId: message.requestId,
+      decision: "accept",
+    });
+    if (!sent) {
       setError("连接已断开，确认还没发出");
       return;
     }
-    socket.send(
-      JSON.stringify({
-        type: "confirm",
-        conversationId: message.conversationId,
-        clientMsgId: newId(),
-        requestId: message.requestId,
-        decision: "accept",
-        text: "同意",
-        projectId: pickedIds[0] || "",
-        projectIds: pickedIds,
-        problemId: pickedIds.length ? nextSnowflake() : "",
-      }),
-    );
     holdRef.current = true;
     setHold(true);
   }
@@ -483,7 +552,7 @@ export function ChatApp() {
     setRenameId("");
     if (!title) return;
     setConvs((prev) => prev.map((conv) => (conv.id === id ? { ...conv, title, renamed: true } : conv)));
-    void fetch(`/api/conversations/${encodeURIComponent(id)}`, {
+    void apiFetch(`/api/conversations/${encodeURIComponent(id)}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ title }),
@@ -497,7 +566,7 @@ export function ChatApp() {
     const current = convs.find((conv) => conv.id === id);
     const pinned = !current?.pinned;
     setConvs((prev) => prev.map((conv) => (conv.id === id ? { ...conv, pinned, pinnedAt: pinned ? Date.now() : 0 } : conv)));
-    void fetch(`/api/conversations/${encodeURIComponent(id)}`, {
+    void apiFetch(`/api/conversations/${encodeURIComponent(id)}`, {
       method: "PATCH",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ pinned }),
@@ -538,7 +607,7 @@ export function ChatApp() {
 
   function deleteConvs(ids: string[]) {
     setMenuId("");
-    void fetch("/api/conversations/delete", {
+    void apiFetch("/api/conversations/delete", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ ids }),
@@ -745,7 +814,10 @@ export function ChatApp() {
                     onCopy={() => void copyMessage(message)}
                     onEdit={() => setEditingKey(messageKey(message))}
                     onCancelEdit={() => setEditingKey("")}
-                    onSubmitEdit={(text) => resendEdited(text, message)}
+                    onOpenImage={openGallery}
+                    maxBytes={maxBytes}
+                    maxLabel={maxLabel}
+                    onSubmitEdit={(text, attachments) => resendEdited(text, attachments)}
                     onRegenerate={() => regenerate(message)}
                   />
                 ))}
@@ -776,6 +848,14 @@ export function ChatApp() {
           </section>
         )}
       </main>
+      {gallery ? (
+        <ImageViewer
+          items={gallery.items}
+          index={gallery.index}
+          onIndex={(index) => setGallery((current) => (current ? { ...current, index } : current))}
+          onClose={() => setGallery(null)}
+        />
+      ) : null}
     </div>
   );
 }
@@ -792,6 +872,9 @@ function MessageView({
   onCopy,
   onEdit,
   onCancelEdit,
+  onOpenImage,
+  maxBytes,
+  maxLabel,
   onSubmitEdit,
   onRegenerate,
 }: {
@@ -806,20 +889,32 @@ function MessageView({
   onCopy: () => void;
   onEdit: () => void;
   onCancelEdit: () => void;
-  onSubmitEdit: (text: string) => void;
+  onOpenImage: (url: string) => void;
+  maxBytes: number;
+  maxLabel: string;
+  onSubmitEdit: (text: string, attachments: ChatAttachment[]) => void;
   onRegenerate: () => void;
 }) {
   if (message.role === "user") {
-    const canEdit = Boolean(captionOf(message).trim() || listedAttachments(message).length);
+    const attachments = listedAttachments(message);
+    const canEdit = Boolean(captionOf(message).trim() || attachments.length);
     return (
-      <article className="msg-user">
+      <article className={editing ? "msg-user editing" : "msg-user"}>
         <div className="msg-col">
           {editing ? (
-            <MessageEditor initial={captionOf(message)} busy={busy} allowEmpty={listedAttachments(message).length > 0} onCancel={onCancelEdit} onSubmit={onSubmitEdit} />
+            <MessageEditor
+              initial={captionOf(message)}
+              attachments={attachments}
+              busy={busy}
+              maxBytes={maxBytes}
+              maxLabel={maxLabel}
+              onCancel={onCancelEdit}
+              onSubmit={onSubmitEdit}
+            />
           ) : (
             <div className="bubble">
               {captionOf(message) ? <RichText text={captionOf(message)} /> : null}
-              <AttachmentList message={message} />
+              <AttachmentList message={message} onOpenImage={onOpenImage} />
               {message.pending ? <div className="pending">待送达，通道恢复后会自动发出</div> : null}
             </div>
           )}
@@ -848,7 +943,7 @@ function MessageView({
         {message.kind === "progress" ? <div className="card-kicker">{message.stage || "进展"}</div> : null}
         {message.kind === "result" ? <div className="card-kicker">结果</div> : null}
         {captionOf(message) ? <RichText text={captionOf(message)} /> : null}
-        <AttachmentList message={message} />
+        <AttachmentList message={message} onOpenImage={onOpenImage} />
         {message.streaming ? <span className="cursor" /> : null}
         {message.kind === "progress" && message.percent >= 0 ? (
           <div className="bar" aria-valuenow={message.percent} aria-valuemin={0} aria-valuemax={100} role="progressbar">
@@ -900,44 +995,164 @@ function CopyButton({ copied, onCopy }: { copied: boolean; onCopy: () => void })
 
 function MessageEditor({
   initial,
+  attachments,
   busy,
-  allowEmpty,
+  maxBytes,
+  maxLabel,
   onCancel,
   onSubmit,
 }: {
   initial: string;
+  attachments: ChatAttachment[];
   busy: boolean;
-  allowEmpty: boolean;
+  maxBytes: number;
+  maxLabel: string;
   onCancel: () => void;
-  onSubmit: (text: string) => void;
+  onSubmit: (text: string, attachments: ChatAttachment[]) => void;
 }) {
   const [value, setValue] = useState(initial);
+  const [items, setItems] = useState<DraftFile[]>(() =>
+    attachments.map((item) => ({
+      id: item.url || newId(),
+      name: item.name,
+      mime: item.mime,
+      size: item.size,
+      status: "ready" as const,
+      percent: 100,
+      url: item.url,
+      preview: imageAttachment(item) ? item.url : "",
+      error: "",
+    })),
+  );
   const ref = useRef<HTMLTextAreaElement | null>(null);
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const itemsRef = useRef(items);
+  itemsRef.current = items;
+  const ready = items.filter((item) => item.status === "ready" && item.url);
+  const canSend = !busy && !items.some((item) => item.status === "uploading") && (Boolean(value.trim()) || ready.length > 0);
   useEffect(() => {
     const area = ref.current;
     if (!area) return;
     area.focus();
     area.setSelectionRange(area.value.length, area.value.length);
-    area.style.height = "0px";
-    area.style.height = `${Math.min(220, area.scrollHeight)}px`;
+    fitEditor(area);
   }, []);
+  useEffect(() => {
+    return () => {
+      for (const item of itemsRef.current) {
+        if (item.preview.startsWith("blob:")) URL.revokeObjectURL(item.preview);
+      }
+    };
+  }, []);
+
+  function submit() {
+    if (!canSend) return;
+    onSubmit(
+      value,
+      ready.map((item) => ({ name: item.name, mime: item.mime, url: item.url, size: item.size })),
+    );
+  }
+
+  function addPicked(list: File[]) {
+    const room = MAX_ATTACHMENTS - itemsRef.current.length;
+    if (room <= 0) return;
+    const accepted: Array<{ draft: DraftFile; file: File }> = [];
+    for (const file of list.slice(0, room)) {
+      const ext = extensionOf(file.name, file.type);
+      if (!ext || file.size <= 0 || file.size > maxBytes) continue;
+      const name = displayFileName(file.name, ext);
+      const preview = file.type.startsWith("image/") || isImageFile(file.type, name) ? URL.createObjectURL(file) : "";
+      accepted.push({
+        file,
+        draft: {
+          id: newId(),
+          name,
+          mime: file.type || "application/octet-stream",
+          size: file.size,
+          status: "uploading",
+          percent: 0,
+          url: "",
+          preview,
+          error: "",
+        },
+      });
+    }
+    if (!accepted.length) return;
+    setItems((prev) => [...prev, ...accepted.map((item) => item.draft)]);
+    for (const item of accepted) void uploadEditorFile(item.draft.id, item.file);
+  }
+
+  async function uploadEditorFile(id: string, file: File) {
+    try {
+      const creds = await fetchUploadCredential(file);
+      await postQiniu(file, creds, (percent) => {
+        setItems((prev) => prev.map((item) => (item.id === id ? { ...item, percent } : item)));
+      });
+      setItems((prev) => prev.map((item) => (item.id === id ? { ...item, status: "ready", percent: 100, url: creds.publicUrl } : item)));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "上传失败，请稍后重试";
+      setItems((prev) => prev.map((item) => (item.id === id ? { ...item, status: "error", error: message } : item)));
+    }
+  }
+
+  function removeItem(id: string) {
+    setItems((prev) => {
+      const found = prev.find((item) => item.id === id);
+      if (found?.preview.startsWith("blob:")) URL.revokeObjectURL(found.preview);
+      return prev.filter((item) => item.id !== id);
+    });
+  }
+
   return (
     <form
       className="msg-edit"
       onSubmit={(event) => {
         event.preventDefault();
-        if (busy || (!value.trim() && !allowEmpty)) return;
-        onSubmit(value);
+        submit();
       }}
     >
+      {items.length ? (
+        <div className="attach-row">
+          {items.map((item) =>
+            item.preview ? (
+              <div key={item.id} className={item.status === "error" ? "attach-thumb bad" : "attach-thumb"} title={item.error || item.name}>
+                <img src={item.preview} alt={item.name} />
+                {item.status === "uploading" ? (
+                  <i className="progress" aria-hidden="true">
+                    <span style={{ width: `${item.percent}%` }} />
+                  </i>
+                ) : null}
+                <button type="button" className="remove" onClick={() => removeItem(item.id)} aria-label={`移除${item.name}`}>
+                  ×
+                </button>
+              </div>
+            ) : (
+              <div key={item.id} className={item.status === "error" ? "file-chip bad" : "file-chip"} title={item.error || item.name}>
+                <span>{item.name}</span>
+                <small>{item.status === "uploading" ? `${item.percent}%` : formatBytes(item.size)}</small>
+                <button type="button" onClick={() => removeItem(item.id)} aria-label={`移除${item.name}`}>
+                  ×
+                </button>
+              </div>
+            ),
+          )}
+        </div>
+      ) : null}
       <textarea
         ref={ref}
         value={value}
         aria-label="修改消息"
         onChange={(event) => {
           setValue(event.target.value);
-          event.target.style.height = "0px";
-          event.target.style.height = `${Math.min(220, event.target.scrollHeight)}px`;
+          fitEditor(event.target);
+        }}
+        onPaste={(event) => {
+          const picked = filesFromClipboard(event.clipboardData);
+          if (!picked.length) return;
+          event.preventDefault();
+          const pasted = event.clipboardData?.getData("text/plain") || "";
+          if (pasted) insertText(event.currentTarget, pasted, setValue);
+          addPicked(picked);
         }}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
@@ -946,20 +1161,38 @@ function MessageEditor({
           }
           if (event.key === "Enter" && !event.shiftKey) {
             event.preventDefault();
-            if (!busy && (value.trim() || allowEmpty)) onSubmit(value);
+            submit();
           }
         }}
       />
       <div className="msg-edit-bar">
+        <button type="button" className="icon-btn" aria-label={`添加附件，单个不超过 ${maxLabel}`} title={`单个文件不超过 ${maxLabel}`} onClick={() => fileRef.current?.click()}>
+          <Clip />
+        </button>
+        <input
+          ref={fileRef}
+          type="file"
+          multiple
+          hidden
+          onChange={(event) => {
+            addPicked(filesFromList(event.target.files));
+            event.target.value = "";
+          }}
+        />
         <button type="button" className="msg-edit-cancel" onClick={onCancel}>
           取消
         </button>
-        <button type="submit" className="msg-edit-send" disabled={busy || (!value.trim() && !allowEmpty)}>
+        <button type="submit" className="msg-edit-send" disabled={!canSend}>
           发送
         </button>
       </div>
     </form>
   );
+}
+
+function fitEditor(area: HTMLTextAreaElement) {
+  area.style.height = "0px";
+  area.style.height = `${Math.min(220, Math.max(52, area.scrollHeight))}px`;
 }
 
 function MessageTime({ time }: { time: string }) {
@@ -973,16 +1206,16 @@ function displayTime(value: string): string {
   return matched ? `${matched[1]} ${matched[2]}` : "";
 }
 
-function AttachmentList({ message }: { message: ChatMessage }) {
+function AttachmentList({ message, onOpenImage }: { message: ChatMessage; onOpenImage: (url: string) => void }) {
   const items = listedAttachments(message);
   if (!items.length) return null;
   return (
     <div className="attach-list">
       {items.map((item) =>
-        isImageFile(item.mime, item.name) ? (
-          <a key={item.url} className="attach-shot" href={item.url} target="_blank" rel="noreferrer">
-            <img src={item.url} alt={item.name} />
-          </a>
+        imageAttachment(item) ? (
+          <button key={item.url} type="button" className="attach-shot" aria-label={`预览${item.name || "图片"}`} onClick={() => onOpenImage(item.url)}>
+            <img src={item.url} alt={item.name || "图片"} />
+          </button>
         ) : (
           <a key={item.url} className="file-chip" href={item.url} target="_blank" rel="noreferrer">
             <span>{item.name}</span>
@@ -990,6 +1223,71 @@ function AttachmentList({ message }: { message: ChatMessage }) {
           </a>
         ),
       )}
+    </div>
+  );
+}
+
+function ImageViewer({
+  items,
+  index,
+  onIndex,
+  onClose,
+}: {
+  items: ChatAttachment[];
+  index: number;
+  onIndex: (index: number) => void;
+  onClose: () => void;
+}) {
+  const item = items[index];
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+      if (event.key === "ArrowLeft" && items.length > 1) onIndex((index - 1 + items.length) % items.length);
+      if (event.key === "ArrowRight" && items.length > 1) onIndex((index + 1) % items.length);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [index, items.length, onClose, onIndex]);
+  if (!item) return null;
+  return (
+    <div className="viewer" role="dialog" aria-modal="true" aria-label="图片预览" onClick={onClose}>
+      <button type="button" className="viewer-close" aria-label="关闭预览" onClick={onClose}>
+        ×
+      </button>
+      {items.length > 1 ? (
+        <button
+          type="button"
+          className="viewer-nav prev"
+          aria-label="上一张"
+          onClick={(event) => {
+            event.stopPropagation();
+            onIndex((index - 1 + items.length) % items.length);
+          }}
+        >
+          ‹
+        </button>
+      ) : null}
+      <figure onClick={(event) => event.stopPropagation()}>
+        <img src={item.url} alt={item.name || "图片"} />
+        {items.length > 1 ? (
+          <figcaption>
+            {index + 1} / {items.length}
+          </figcaption>
+        ) : null}
+      </figure>
+      {items.length > 1 ? (
+        <button
+          type="button"
+          className="viewer-nav next"
+          aria-label="下一张"
+          onClick={(event) => {
+            event.stopPropagation();
+            onIndex((index + 1) % items.length);
+          }}
+        >
+          ›
+        </button>
+      ) : null}
     </div>
   );
 }
@@ -1235,6 +1533,23 @@ function captionOf(message: ChatMessage): string {
   const names = items.map((item) => item.name).join("、");
   if (text === names || (items.length === 1 && text === items[0].name)) return "";
   return message.text;
+}
+
+function imageAttachment(item: ChatAttachment): boolean {
+  if (isImageFile(item.mime, item.name)) return true;
+  const path = item.url.split("?")[0].split("#")[0];
+  return isImageFile("", path);
+}
+
+function userImages(messages: ChatMessage[]): ChatAttachment[] {
+  const list: ChatAttachment[] = [];
+  for (const message of messages) {
+    if (message.role !== "user") continue;
+    for (const item of listedAttachments(message)) {
+      if (imageAttachment(item) && item.url && !list.some((have) => have.url === item.url)) list.push(item);
+    }
+  }
+  return list;
 }
 
 function listedAttachments(message: ChatMessage): ChatAttachment[] {

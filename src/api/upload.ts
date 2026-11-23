@@ -1,3 +1,5 @@
+import { apiFetch } from "./session";
+
 export type UploadCredential = {
   token: string;
   key: string;
@@ -8,7 +10,7 @@ export type UploadCredential = {
 };
 
 export async function fetchUploadCredential(file: File): Promise<UploadCredential> {
-  const res = await fetch("/api/upload/token", {
+  const res = await apiFetch("/api/upload/token", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ fileName: file.name, mime: file.type, fileSize: file.size }),

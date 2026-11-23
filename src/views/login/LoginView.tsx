@@ -1,9 +1,7 @@
-"use client";
-
 import { useEffect, useState, type FormEvent } from "react";
-import { useRouter } from "next/navigation";
-import { Mark } from "../mark";
-import { ensureSession, resumeSessionWatch } from "../session";
+import { Mark } from "@/components/mark";
+import { apiFetch, ensureSession, resumeSessionWatch, saveSession } from "@/api/session";
+import { useRouter } from "@/router";
 
 export default function LoginPage() {
   const router = useRouter();
@@ -24,16 +22,17 @@ export default function LoginPage() {
     setPending(true);
     setError("");
     try {
-      const res = await fetch("/api/auth/login", {
+      const res = await apiFetch("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ username, password }),
       });
-      const body = (await res.json()) as { error?: string };
+      const body = (await res.json()) as { error?: string; accessToken?: string; refreshToken?: string; token?: string; expiresIn?: number; user?: { id?: string; username?: string; displayName?: string; roleCode?: string } };
       if (!res.ok) {
         setError(body.error || "登录失败");
         return;
       }
+      saveSession(body);
       router.replace(destination());
     } catch {
       setError("网络异常，请重试");

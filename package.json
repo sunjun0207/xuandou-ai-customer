@@ -2,24 +2,23 @@
   "name": "xuandou-ai-customer",
   "version": "1.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
-    "dev": "tsx --env-file=.env.dev server/index.ts",
-    "build": "next build",
-    "start": "tsx --env-file=.env.pro server/index.ts",
+    "dev": "vite --mode dev --host 0.0.0.0 --port 4100",
+    "build": "tsc --noEmit && vite build --mode pro",
+    "start": "vite preview --host 0.0.0.0 --port 4100",
+    "preview": "vite preview --host 0.0.0.0 --port 4100",
     "smoke": "node scripts/smoke.cjs"
   },
   "dependencies": {
-    "next": "^15.5.4",
     "react": "^19.1.1",
-    "react-dom": "^19.1.1",
-    "ws": "^8.18.3"
+    "react-dom": "^19.1.1"
   },
   "devDependencies": {
-    "@types/node": "^20.19.11",
     "@types/react": "^19.1.12",
     "@types/react-dom": "^19.1.9",
-    "@types/ws": "^8.18.1",
-    "tsx": "^4.20.5",
-    "typescript": "^5.9.2"
+    "@vitejs/plugin-react": "^4.3.4",
+    "typescript": "^5.9.2",
+    "vite": "^6.4.1"
   }
 }
