@@ -316,7 +316,7 @@ button { cursor: pointer; }
   place-items: center;
 }
 .send:hover { background: var(--blue-press); }
-.send:disabled { opacity: 0.35; cursor: default; }
+.send:disabled, .send:disabled:hover { opacity: 0.35; background: var(--blue); cursor: default; }
 
 .picked { display: flex; flex-wrap: wrap; gap: 6px; padding: 2px 4px 6px; }
 .picked-chip {

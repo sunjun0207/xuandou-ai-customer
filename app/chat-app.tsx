@@ -39,6 +39,7 @@ export function ChatApp() {
   const [selecting, setSelecting] = useState(false);
   const [checked, setChecked] = useState<string[]>([]);
   const [hint, setHint] = useState("");
+  const [hold, setHold] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const activeIdRef = useRef(activeId);
   activeIdRef.current = activeId;
@@ -46,6 +47,7 @@ export function ChatApp() {
   const boxRef = useRef<HTMLTextAreaElement | null>(null);
   const fileRef = useRef<HTMLInputElement | null>(null);
   const renameIdRef = useRef("");
+  const holdRef = useRef(false);
   renameIdRef.current = renameId;
 
   useEffect(() => {
@@ -155,6 +157,8 @@ export function ChatApp() {
         if (frame.type === "ready" || frame.type === "status") setUpstream(frame.upstream);
         if (frame.type === "error") {
           setError(frame.error);
+          holdRef.current = false;
+          setHold(false);
           if (frame.clientMsgId) setConvs((prev) => removeMessage(prev, frame.clientMsgId));
         }
         if (frame.type === "message") setConvs((prev) => applyMessage(prev, inOpenConversation(frame.message, activeIdRef.current)));
@@ -205,6 +209,17 @@ export function ChatApp() {
   const listed = sortConvs(convs);
   const messages = active?.messages || [];
   const hero = messages.length === 0;
+  const waiting = hold || awaitingReply(messages);
+
+  const waitingRef = useRef(false);
+  useEffect(() => {
+    const pending = awaitingReply(messages);
+    if (waitingRef.current && !pending) {
+      holdRef.current = false;
+      setHold(false);
+    }
+    waitingRef.current = pending || holdRef.current;
+  }, [messages]);
 
   useEffect(() => {
     const el = threadRef.current;
@@ -212,6 +227,7 @@ export function ChatApp() {
   }, [messages, messages[messages.length - 1]?.text]);
 
   function send(text = draft.trim(), confirm = confirming) {
+    if ((holdRef.current || awaitingReply(messages)) && !confirm) return;
     const socket = wsRef.current;
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       setError("连接已断开，这句话还没发出");
@@ -249,6 +265,8 @@ export function ChatApp() {
     setFile(null);
     setConfirming(null);
     setError("");
+    holdRef.current = true;
+    setHold(true);
     if (boxRef.current) boxRef.current.style.height = "";
   }
 
@@ -275,6 +293,8 @@ export function ChatApp() {
         problemId: pickedIds.length ? nextSnowflake() : "",
       }),
     );
+    holdRef.current = true;
+    setHold(true);
   }
 
   function onFile(list: FileList | null) {
@@ -540,10 +560,11 @@ export function ChatApp() {
               fileRef={fileRef}
               onFile={onFile}
               onSend={() => send()}
+              waiting={waiting}
             />
             <div className="chips">
               {SUGGESTIONS.map((item) => (
-                <button key={item} type="button" className="chip" onClick={() => send(item, null)}>
+                <button key={item} type="button" className="chip" disabled={waiting} onClick={() => send(item, null)}>
                   {item}
                 </button>
               ))}
@@ -576,6 +597,7 @@ export function ChatApp() {
                 fileRef={fileRef}
                 onFile={onFile}
                 onSend={() => send()}
+                waiting={waiting}
               />
             </div>
           </section>
@@ -663,6 +685,7 @@ function Composer({
   fileRef,
   onFile,
   onSend,
+  waiting,
 }: {
   draft: string;
   setDraft: (value: string) => void;
@@ -680,6 +703,7 @@ function Composer({
   fileRef: { current: HTMLInputElement | null };
   onFile: (list: FileList | null) => void;
   onSend: () => void;
+  waiting: boolean;
 }) {
   const picked = projects.filter((item) => pickedIds.includes(item.id));
   return (
@@ -716,7 +740,7 @@ function Composer({
           ref={boxRef}
           rows={1}
           value={draft}
-          placeholder={confirming ? "说说要改哪里" : "给炫兜发消息"}
+          placeholder={confirming ? "说说要改哪里" : waiting ? "等待回复后再继续提问" : "给炫兜发消息"}
           aria-label="给炫兜发消息"
           onChange={(event) => {
             setDraft(event.target.value);
@@ -740,7 +764,7 @@ function Composer({
               关联项目{picked.length ? ` · ${picked.length}` : ""}
             </button>
           </div>
-          <button className="send" type="button" aria-label="发送" disabled={!draft.trim() && !file} onClick={onSend}>
+          <button className="send" type="button" aria-label={waiting ? "等待回复" : "发送"} disabled={waiting || (!draft.trim() && !file)} onClick={onSend}>
             <Arrow />
           </button>
         </div>
@@ -841,6 +865,16 @@ function sortConvs(convs: Conv[]): Conv[] {
 
 function trim(convs: Conv[]): Conv[] {
   return sortConvs(convs).slice(0, 50).map((conv) => ({ ...conv, messages: conv.messages.slice(-200) }));
+}
+
+function awaitingReply(messages: ChatMessage[]): boolean {
+  if (messages.some((message) => message.streaming)) return true;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message.role === "system") continue;
+    return message.role === "user";
+  }
+  return false;
 }
 
 function titleFrom(text: string): string {
