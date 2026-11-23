@@ -219,7 +219,7 @@ export function ChatApp() {
       <aside className="sidebar">
         <div className="side-head">
           <Mark />
-          <strong>玄斗</strong>
+          <strong>炫兜</strong>
         </div>
         <button className="new-chat" type="button" onClick={() => { setActiveId(""); setConfirming(null); setNav(false); }}>
           <Plus />
@@ -459,8 +459,8 @@ function Composer({
           ref={boxRef}
           rows={1}
           value={draft}
-          placeholder={confirming ? "说说要改哪里" : "给玄斗发消息"}
-          aria-label="给玄斗发消息"
+          placeholder={confirming ? "说说要改哪里" : "给炫兜发消息"}
+          aria-label="给炫兜发消息"
           onChange={(event) => {
             setDraft(event.target.value);
             event.target.style.height = "0px";

@@ -11,11 +11,11 @@ export async function handleLogin(req: IncomingMessage, res: ServerResponse) {
   if (remote === "down") {
     const dev = devSession(username, password);
     if (!dev) return sendJson(res, 503, { error: "登录服务暂时不可用" });
-    writeSession(res, dev);
+    writeSession(req, res, dev);
     return sendJson(res, 200, { user: publicUser(dev) });
   }
   if (!remote.session) return sendJson(res, remote.status, { error: remote.error || "登录失败" });
-  writeSession(res, remote.session);
+  writeSession(req, res, remote.session);
   sendJson(res, 200, { user: publicUser(remote.session) });
 }
 
@@ -75,7 +75,9 @@ async function loginFrp(username: string, password: string): Promise<"down" | { 
       exp: Math.floor(Date.now() / 1000) + 7 * 24 * 3600,
     };
     return { status: 200, session };
-  } catch {
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : "unreachable";
+    console.error(`frp login unreachable ${base}: ${reason}`);
     return "down";
   }
 }

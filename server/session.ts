@@ -23,18 +23,24 @@ export function readSession(req: IncomingMessage): Session | undefined {
   return session;
 }
 
-export function writeSession(res: ServerResponse, session: Session) {
+export function writeSession(req: IncomingMessage, res: ServerResponse, session: Session) {
   const token = sign(session);
-  const secure = process.env.COOKIE_SECURE === "true" ? "; Secure" : "";
-  res.setHeader("Set-Cookie", `${COOKIE}=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${TTL}${secure}`);
+  res.setHeader("Set-Cookie", `${COOKIE}=${token}; HttpOnly; Path=/; SameSite=Lax; Max-Age=${TTL}${secureAttribute(req)}`);
 }
 
 export function clearSession(req: IncomingMessage, res: ServerResponse) {
   const token = cookieValue(req.headers.cookie, COOKIE);
   const index = token.lastIndexOf(".");
   if (index > 0) revoked.add(token.slice(index + 1));
-  const secure = process.env.COOKIE_SECURE === "true" ? "; Secure" : "";
-  res.setHeader("Set-Cookie", `${COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0${secure}`);
+  res.setHeader("Set-Cookie", `${COOKIE}=; HttpOnly; Path=/; SameSite=Lax; Max-Age=0${secureAttribute(req)}`);
+}
+
+function secureAttribute(req: IncomingMessage): string {
+  if (process.env.COOKIE_SECURE === "false") return "";
+  const forwarded = String(req.headers["x-forwarded-proto"] || "").split(",")[0].trim().toLowerCase();
+  if (forwarded === "http") return "";
+  const https = forwarded === "https" || Boolean((req.socket as { encrypted?: boolean }).encrypted);
+  return https ? "; Secure" : "";
 }
 
 export function publicUser(session: Session) {

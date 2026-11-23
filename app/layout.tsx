@@ -2,7 +2,7 @@ import type { ReactNode } from "react";
 import "./globals.css";
 
 export const metadata = {
-  title: "玄斗",
+  title: "炫兜",
   description: "把需求说清楚，研发管线会接着做",
 };
 

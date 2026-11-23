@@ -44,7 +44,7 @@ export default function LoginPage() {
     <main className="login-page">
       <form className="login-card" onSubmit={onSubmit}>
         <Mark size={42} />
-        <h1>玄斗</h1>
+        <h1>炫兜</h1>
         <p>把需求说清楚，研发管线会接着做。</p>
         <label className="field">
           <span>账号</span>
